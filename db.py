@@ -261,6 +261,48 @@ def get_latest_account_snapshot(account_id: int, on_or_before: str | None = None
     return row
 
 
+def get_account_snapshots(account_id: int | None = None) -> list[sqlite3.Row]:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    if account_id is None:
+        cur.execute(
+            """
+            SELECT
+                account_snapshots.id,
+                account_snapshots.account_id,
+                accounts.name AS account_name,
+                account_snapshots.snapshot_date,
+                account_snapshots.balance,
+                account_snapshots.note
+            FROM account_snapshots
+            JOIN accounts ON accounts.id = account_snapshots.account_id
+            ORDER BY account_snapshots.snapshot_date DESC, accounts.name
+            """
+        )
+    else:
+        cur.execute(
+            """
+            SELECT
+                account_snapshots.id,
+                account_snapshots.account_id,
+                accounts.name AS account_name,
+                account_snapshots.snapshot_date,
+                account_snapshots.balance,
+                account_snapshots.note
+            FROM account_snapshots
+            JOIN accounts ON accounts.id = account_snapshots.account_id
+            WHERE account_snapshots.account_id = ?
+            ORDER BY account_snapshots.snapshot_date DESC
+            """,
+            (account_id,),
+        )
+
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
 def is_rule_expired(end_date: str | None, today: date | None = None) -> bool:
     if not end_date:
         return False
