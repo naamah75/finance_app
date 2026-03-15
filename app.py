@@ -1,45 +1,43 @@
 from nicegui import ui
-import sqlite3
-from pathlib import Path
 
-DB_PATH = Path("finance.db")
-
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS accounts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT,
-        balance REAL
-    )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-def get_accounts():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    cur.execute("SELECT name, balance FROM accounts")
-    rows = cur.fetchall()
-
-    conn.close()
-    return rows
+from db import get_accounts, get_transaction_rules, init_db
 
 
 init_db()
 
-ui.label("Finance App").style("font-size: 24px")
+accounts = get_accounts()
+rules = get_transaction_rules()
 
-with ui.card():
-    ui.label("Conti correnti")
+ui.label("Finance App").style("font-size: 24px; font-weight: 600")
 
-    for name, balance in get_accounts():
-        ui.label(f"{name}: {balance:.2f} €")
+with ui.row().classes("w-full items-start gap-4"):
+    with ui.card().classes("min-w-[320px]"):
+        ui.label("Conti correnti").style("font-size: 20px")
+
+        if not accounts:
+            ui.label("Nessun conto presente nel database.")
+        else:
+            for account in accounts:
+                if account["balance"] is None:
+                    ui.label(f"{account['name']}: saldo non impostato")
+                else:
+                    ui.label(f"{account['name']}: {account['balance']:.2f} EUR")
+
+    with ui.card().classes("min-w-[520px]"):
+        ui.label("Regole importate").style("font-size: 20px")
+
+        if not rules:
+            ui.label("Nessuna regola importata. Esegui import_excel.py con il file xlsx.")
+        else:
+            for rule in rules:
+                cadence = f"giorno {rule['day_of_month']}"
+                if rule["frequency"] == "yearly" and rule["month_of_year"]:
+                    cadence = f"{rule['day_of_month']}/{rule['month_of_year']}"
+
+                payment_method = rule["payment_method"] or "n/d"
+                ui.label(
+                    f"{rule['account_name']} | {rule['description']} | {rule['amount']:.2f} EUR | "
+                    f"{rule['frequency']} | {cadence} | {payment_method}"
+                )
 
 ui.run()
