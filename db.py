@@ -160,6 +160,15 @@ def get_accounts() -> list[sqlite3.Row]:
     return rows
 
 
+def get_account_by_name(name: str) -> sqlite3.Row | None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, name, balance FROM accounts WHERE name = ?", (name,))
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
 def get_transaction_rules(active_only: bool = False) -> list[sqlite3.Row]:
     conn = get_connection()
     cur = conn.cursor()
@@ -202,6 +211,54 @@ def set_transaction_rule_active(rule_id: int, active: bool) -> None:
     )
     conn.commit()
     conn.close()
+
+
+def upsert_account_snapshot(account_id: int, snapshot_date: str, balance: float, note: str | None = None) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO account_snapshots(account_id, snapshot_date, balance, note)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(account_id, snapshot_date)
+        DO UPDATE SET balance = excluded.balance, note = excluded.note
+        """,
+        (account_id, snapshot_date, balance, note),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_latest_account_snapshot(account_id: int, on_or_before: str | None = None) -> sqlite3.Row | None:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    if on_or_before:
+        cur.execute(
+            """
+            SELECT id, account_id, snapshot_date, balance, note
+            FROM account_snapshots
+            WHERE account_id = ? AND snapshot_date <= ?
+            ORDER BY snapshot_date DESC
+            LIMIT 1
+            """,
+            (account_id, on_or_before),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id, account_id, snapshot_date, balance, note
+            FROM account_snapshots
+            WHERE account_id = ?
+            ORDER BY snapshot_date DESC
+            LIMIT 1
+            """,
+            (account_id,),
+        )
+
+    row = cur.fetchone()
+    conn.close()
+    return row
 
 
 def is_rule_expired(end_date: str | None, today: date | None = None) -> bool:
