@@ -22,25 +22,56 @@ This is the "prototype zero": the goal is to confirm that the environment works 
 ## Project files
 
 - `app.py`: starts the app, initializes the database, and shows accounts
-- `requirements.txt`: Python dependencies
+- `requirements.txt`: Python dependencies needed to run the app
 - `.gitignore`: ignores local and generated files
+- `AGENTS.md`: working instructions for OpenCode and future sessions
 
-## How to run
+## Setup and run
 
-1. Create and activate a virtual environment
-2. Install dependencies:
+### Windows PowerShell
 
-```bash
+Create a virtual environment if needed:
+
+```powershell
+python -m venv .venv
+```
+
+Activate it:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+Install dependencies:
+
+```powershell
 pip install -r requirements.txt
 ```
 
-3. Start the app:
+Start the app:
 
-```bash
+```powershell
 python app.py
 ```
 
-4. Open the browser at `http://localhost:8080`
+Open the browser at `http://localhost:8080`.
+
+### If `.venv` is already in OneDrive
+
+You may already see the `.venv` folder on another PC because OneDrive syncs the files, but it is not guaranteed to be reusable.
+
+Why:
+
+- virtual environments often contain absolute paths tied to the machine where they were created
+- they can break if Python is installed in a different location
+- they can break if the Python version differs between PCs
+
+So the safe rule is:
+
+- if the synced `.venv` works, fine
+- if activation or imports fail, delete and recreate `.venv` locally with `python -m venv .venv`
+
+Git remains the source of truth for code. The virtual environment is just a local convenience.
 
 ## Current behavior
 
@@ -69,6 +100,19 @@ conn.close()
 
 Refresh the page to see the accounts.
 
+## Working from another PC
+
+Recommended flow:
+
+1. Open the repository folder
+2. Run `git pull`
+3. Activate `.venv` if it works, otherwise recreate it
+4. Run `pip install -r requirements.txt`
+5. Start OpenCode from the repository root
+6. Work normally, then `git add`, `git commit`, and `git push`
+
+OneDrive is useful for having the folder available across machines, but Git should handle project history and synchronization.
+
 ## Next steps
 
 - expand the data model beyond `accounts`
@@ -76,13 +120,3 @@ Refresh the page to see the accounts.
 - import data from Excel/XLSM
 - calculate projected balances over time
 - add charts and a more complete dashboard
-
-## Working from another PC
-
-- open the same repository folder
-- run `git pull` before starting work
-- activate the local virtual environment or create a new one
-- install dependencies if needed
-- start OpenCode from the repository root so it can read project context
-
-OneDrive can help keep the folder available across machines, but Git should remain the source of truth for code history and synchronization.
