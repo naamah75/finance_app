@@ -12,6 +12,7 @@ Build a simple personal finance app that starts local-first, stays easy to run, 
 - The data model now includes `accounts`, `transaction_rules`, and `account_snapshots`
 - Excel import currently reads compact rules from `xlsx` via `import_excel.py`
 - A first forecast engine draft lives in `forecast.py`
+- The UI already includes account cards, rule management, snapshot entry, forecast output, and a first dashboard view
 
 ## Main principles
 
@@ -63,12 +64,12 @@ Default local URL:
 
 ## Near-term roadmap
 
-- improve the `accounts` area
-- add transactions
-- add recurring transactions/rules
-- import data from Excel/XLSX
-- compute future balance projections
-- add charts and dashboard views
+- improve the dashboard and accounts overview
+- add manual create/edit of rules inside the app
+- add reconciliation workflows starting from real balances on specific dates
+- improve forecast presentation with charts and timeline views
+- add transaction/history handling beyond imported planning rules
+- prepare the eventual switch from Excel-managed rules to app-managed rules
 
 ## Agreed planning model
 
@@ -94,10 +95,22 @@ Default local URL:
 - `db.py` owns schema creation and basic SQLite helpers
 - `import_excel.py` is intended to be safe to rerun; for now it replaces imported `transaction_rules` from the latest workbook contents
 - `app.py` already includes a rule management view with filter by account, manual enable/disable, and automatic expired-state detection from `end_date`
+- `app.py` also includes snapshot entry/listing and a first forecast UI that can use either a manual opening balance or the latest available snapshot
+- `app.py` includes a first dashboard that summarizes each account from its latest snapshot to a selected end date
 - Keep manual disable (`active`) separate from automatic expiry; do not overwrite manual intent when a rule becomes expired
 - `forecast.py` is the first draft of the projection engine and expands compact rules into dated forecast events
 - In the current forecast draft, `Conto` rules generate direct account events and `Carta` rules are aggregated into a single debit on day `10` of the following month
-- When the workbook changes over time, re-run the import instead of editing imported rules manually in the database unless a future feature explicitly supports local overrides
+- The current forecast result also tracks min/max projected balance and exposes card-settlement detail for aggregated card charges
+- While the Excel workbook is still the source of truth, re-run the import when the workbook changes
+- The expected future transition is a clean switch: stop maintaining rules in Excel and manage them directly in the app
+
+## Current priorities
+
+- keep the Excel import reliable so rules can be refreshed while the workbook is still being used
+- improve the dashboard and forecast UX so low-balance periods are easy to spot
+- add manual CRUD for rules so the app can eventually replace the workbook
+- build clearer reconciliation flows around `account_snapshots`
+- preserve simplicity and avoid over-engineering before the Excel-to-app transition
 
 ## Agent instructions
 
