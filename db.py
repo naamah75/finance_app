@@ -21,15 +21,29 @@ def init_db() -> None:
         CREATE TABLE IF NOT EXISTS accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT,
-            balance REAL
+            balance REAL,
+            overdraft_limit REAL
         )
         """
     )
+
+    cur.execute("PRAGMA table_info(accounts)")
+    account_columns = {row[1] for row in cur.fetchall()}
+    if "overdraft_limit" not in account_columns:
+        cur.execute("ALTER TABLE accounts ADD COLUMN overdraft_limit REAL")
 
     cur.execute(
         """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_name
         ON accounts(name)
+        """
+    )
+
+    cur.execute(
+        """
+        UPDATE accounts
+        SET overdraft_limit = 1500
+        WHERE name = 'Unicredit' AND overdraft_limit IS NULL
         """
     )
 
@@ -71,6 +85,15 @@ def init_db() -> None:
 
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+        """
+    )
+
+    cur.execute(
+        """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_account_snapshots_unique
         ON account_snapshots(account_id, snapshot_date)
         """
@@ -80,19 +103,25 @@ def init_db() -> None:
     conn.close()
 
 
-def upsert_account(name: str, balance: float | None = None) -> int:
+def upsert_account(name: str, balance: float | None = None, overdraft_limit: float | None = None) -> int:
     conn = get_connection()
     cur = conn.cursor()
 
     cur.execute(
-        "INSERT OR IGNORE INTO accounts(name, balance) VALUES (?, ?)",
-        (name, balance),
+        "INSERT OR IGNORE INTO accounts(name, balance, overdraft_limit) VALUES (?, ?, ?)",
+        (name, balance, overdraft_limit),
     )
 
     if balance is not None:
         cur.execute(
             "UPDATE accounts SET balance = ? WHERE name = ?",
             (balance, name),
+        )
+
+    if overdraft_limit is not None:
+        cur.execute(
+            "UPDATE accounts SET overdraft_limit = ? WHERE name = ?",
+            (overdraft_limit, name),
         )
 
     cur.execute("SELECT id FROM accounts WHERE name = ?", (name,))
@@ -154,7 +183,7 @@ def replace_transaction_rules(rules: list[dict]) -> None:
 def get_accounts() -> list[sqlite3.Row]:
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT id, name, balance FROM accounts ORDER BY name")
+    cur.execute("SELECT id, name, balance, overdraft_limit FROM accounts ORDER BY name")
     rows = cur.fetchall()
     conn.close()
     return rows
@@ -163,10 +192,47 @@ def get_accounts() -> list[sqlite3.Row]:
 def get_account_by_name(name: str) -> sqlite3.Row | None:
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT id, name, balance FROM accounts WHERE name = ?", (name,))
+    cur.execute("SELECT id, name, balance, overdraft_limit FROM accounts WHERE name = ?", (name,))
     row = cur.fetchone()
     conn.close()
     return row
+
+
+def set_account_overdraft_limit(account_id: int, overdraft_limit: float) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE accounts SET overdraft_limit = ? WHERE id = ?",
+        (overdraft_limit, account_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_setting(key: str, default: str | None = None) -> str | None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
+    row = cur.fetchone()
+    conn.close()
+    if row is None:
+        return default
+    return row["value"]
+
+
+def set_setting(key: str, value: str) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO app_settings(key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
 
 
 def get_transaction_rules(active_only: bool = False) -> list[sqlite3.Row]:

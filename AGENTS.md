@@ -10,9 +10,11 @@ Build a simple personal finance app that starts local-first, stays easy to run, 
 - UI uses NiceGUI
 - Data uses local SQLite in `finance.db`
 - The data model now includes `accounts`, `transaction_rules`, and `account_snapshots`
+- The data model also includes app-level settings stored in SQLite, such as the default forecast window and warning threshold
 - Excel import currently reads compact rules from `xlsx` via `import_excel.py`
 - A first forecast engine draft lives in `forecast.py`
-- The UI already includes account cards, rule management, snapshot entry, forecast output, and a first dashboard view
+- The UI now includes dedicated `Movimenti`, `Regole`, and `Impostazioni` tabs
+- The `Movimenti` tab is centered on one selected account at a time and shows editable snapshot inputs plus a movement-by-movement forecast table
 
 ## Main principles
 
@@ -93,23 +95,26 @@ Default local URL:
 ## Current implementation notes
 
 - `db.py` owns schema creation and basic SQLite helpers
+- `db.py` also stores lightweight UI/application settings in `app_settings`
 - `import_excel.py` is intended to be safe to rerun; for now it replaces imported `transaction_rules` from the latest workbook contents
 - `app.py` already includes a rule management view with filter by account, manual enable/disable, and automatic expired-state detection from `end_date`
-- `app.py` also includes snapshot entry/listing and a first forecast UI that can use either a manual opening balance or the latest available snapshot
-- `app.py` includes a first dashboard that summarizes each account from its latest snapshot to a selected end date
+- `app.py` includes a `Movimenti` view focused on a single active account, with direct snapshot update inputs and a compact forecast table
+- The forecast table currently uses per-month background colors, movement/status icons, compact rows, and IBM Plex fonts for readability
+- `app.py` includes an `Impostazioni` view for account overdraft values, default forecast window months, and the warning threshold used by the forecast UI
 - Keep manual disable (`active`) separate from automatic expiry; do not overwrite manual intent when a rule becomes expired
 - `forecast.py` is the first draft of the projection engine and expands compact rules into dated forecast events
 - In the current forecast draft, `Conto` rules generate direct account events and `Carta` rules are aggregated into a single debit on day `10` of the following month
-- The current forecast result also tracks min/max projected balance and exposes card-settlement detail for aggregated card charges
+- The current forecast result also tracks min/max projected balance and account overdraft limits
 - While the Excel workbook is still the source of truth, re-run the import when the workbook changes
 - The expected future transition is a clean switch: stop maintaining rules in Excel and manage them directly in the app
 
 ## Current priorities
 
 - keep the Excel import reliable so rules can be refreshed while the workbook is still being used
-- improve the dashboard and forecast UX so low-balance periods are easy to spot
+- improve the `Movimenti` view and forecast UX so low-balance periods are easy to spot
 - add manual CRUD for rules so the app can eventually replace the workbook
 - build clearer reconciliation flows around `account_snapshots`
+- keep refining the one-account-at-a-time workflow in `Movimenti` before expanding the rest of the UI
 - preserve simplicity and avoid over-engineering before the Excel-to-app transition
 
 ## Agent instructions

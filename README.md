@@ -1,30 +1,50 @@
 # Finance App
 
-Simple local personal finance app built with Python, NiceGUI, and SQLite.
+Simple local-first personal finance app built with Python, NiceGUI, and SQLite.
 
 ## Current status
 
-The project currently includes a first working prototype:
+The project is no longer just a prototype. It now includes:
 
-- local web UI with NiceGUI
+- local NiceGUI web app in `app.py`
 - local SQLite database in `finance.db`
-- `accounts` table auto-created at startup
-- account list rendered in the page
+- reusable compact planning rules in `transaction_rules`
+- dated balance checkpoints in `account_snapshots`
+- app settings in SQLite for forecast behavior
+- Excel import from `xlsx` via `import_excel.py`
+- first forecast engine in `forecast.py`
 
-This is the "prototype zero": the goal is to confirm that the environment works end to end before adding business logic.
+## Current UI
 
-## Tech stack
+The app currently has three main tabs:
 
-- Python 3
-- NiceGUI
-- SQLite
+- `Movimenti`: one account at a time, with snapshot editing and movement-by-movement forecast table
+- `Regole`: imported rules, manual enable/disable, expired-state handling
+- `Impostazioni`: account overdraft values, default forecast window, and warning threshold
 
-## Project files
+The `Movimenti` tab is currently the main operational view.
 
-- `app.py`: starts the app, initializes the database, and shows accounts
-- `requirements.txt`: Python dependencies needed to run the app
-- `.gitignore`: ignores local and generated files
-- `AGENTS.md`: working instructions for OpenCode and future sessions
+## Planning model
+
+- Accounts such as `Fineco` and `Unicredit` are stored in `accounts`
+- Excel rules are imported as compact rules, not pre-generated future rows
+- `OperazioniRicorrenti` becomes monthly rules
+- `OperazioniSingole` becomes yearly rules
+- Real balances are stored as snapshots with a date
+- Forecasts start from a manual or reconciled balance snapshot
+
+## Payment behavior
+
+- If `Pagamento` is `Conto`, the movement hits the account directly on its due date
+- If `Pagamento` is `Carta`, spending is accumulated and charged to the account on day `10` of the following month
+
+## Main files
+
+- `app.py`: NiceGUI interface
+- `db.py`: SQLite schema and helpers
+- `import_excel.py`: imports rules from `xlsx`
+- `forecast.py`: expands compact rules into forecast events
+- `AGENTS.md`: project notes and guidance for future sessions
 
 ## Setup and run
 
@@ -54,51 +74,31 @@ Start the app:
 python app.py
 ```
 
-Open the browser at `http://localhost:8080`.
+Open `http://localhost:8080`.
 
-### If `.venv` is already in OneDrive
+## Import the workbook
 
-You may already see the `.venv` folder on another PC because OneDrive syncs the files, but it is not guaranteed to be reusable.
+Put the planning workbook in the project folder and run:
 
-Why:
-
-- virtual environments often contain absolute paths tied to the machine where they were created
-- they can break if Python is installed in a different location
-- they can break if the Python version differs between PCs
-
-So the safe rule is:
-
-- if the synced `.venv` works, fine
-- if activation or imports fail, delete and recreate `.venv` locally with `python -m venv .venv`
-
-Git remains the source of truth for code. The virtual environment is just a local convenience.
-
-## Current behavior
-
-At startup the app creates this table if it does not exist:
-
-- `accounts(id, name, balance)`
-
-Then it reads all accounts and shows them in the UI.
-
-## Manual test data
-
-You can add sample rows with Python:
-
-```python
-import sqlite3
-
-conn = sqlite3.connect("finance.db")
-cur = conn.cursor()
-
-cur.execute("INSERT INTO accounts (name, balance) VALUES ('Fineco', 3500)")
-cur.execute("INSERT INTO accounts (name, balance) VALUES ('Unicredit', 1200)")
-
-conn.commit()
-conn.close()
+```powershell
+python import_excel.py "Piano economico.xlsx"
 ```
 
-Refresh the page to see the accounts.
+Note:
+
+- the real workbook is treated as local input data and should not be committed
+- while Excel is still the source of truth, rerun the import whenever the workbook changes
+
+## Snapshot and forecast flow
+
+Typical workflow:
+
+1. Select the account in `Movimenti`
+2. Enter or update the real checked balance with date
+3. Save the snapshot
+4. Review the projected movement table for the next months
+
+A snapshot means: on that exact date, the real account balance has been checked manually and should be trusted as the forecast starting point.
 
 ## Working from another PC
 
@@ -113,10 +113,10 @@ Recommended flow:
 
 OneDrive is useful for having the folder available across machines, but Git should handle project history and synchronization.
 
-## Next steps
+## Near-term next steps
 
-- expand the data model beyond `accounts`
-- add transaction and recurring rule support
-- import data from Excel/XLSM
-- calculate projected balances over time
-- add charts and a more complete dashboard
+- improve the one-account-at-a-time `Movimenti` workflow
+- add manual create/edit of rules directly in the app
+- add clearer reconciliation flows around snapshots
+- improve forecast presentation with charts and timeline views
+- prepare the eventual switch from Excel-managed rules to app-managed rules

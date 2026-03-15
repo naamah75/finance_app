@@ -27,6 +27,7 @@ class ForecastResult:
     end_date: date
     opening_balance: float
     closing_balance: float
+    overdraft_limit: float
     min_balance: float
     min_balance_date: date
     max_balance: float
@@ -117,6 +118,8 @@ def build_account_forecast(
             )
         opening_balance = float(snapshot["balance"])
 
+    overdraft_limit = float(account["overdraft_limit"] or 0)
+
     rules = [dict(row) for row in get_transaction_rules() if row["account_name"] == account_name]
 
     direct_events: list[ForecastEvent] = []
@@ -197,6 +200,7 @@ def build_account_forecast(
         end_date=end_date,
         opening_balance=opening_balance,
         closing_balance=closing_balance,
+        overdraft_limit=overdraft_limit,
         min_balance=min_balance,
         min_balance_date=min_balance_date,
         max_balance=max_balance,
