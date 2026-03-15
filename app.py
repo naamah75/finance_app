@@ -43,6 +43,64 @@ def load_rules(account_filter: str) -> list[dict]:
     return [rule for rule in rules if rule["account_name"] == account_filter]
 
 
+def get_dashboard_status(min_balance: float) -> tuple[str, str]:
+    if min_balance < 0:
+        return "Critico", "#8a1c1c"
+    if min_balance < 300:
+        return "Attenzione", "#8b5e00"
+    return "Stabile", "#1f7a1f"
+
+
+def build_dashboard_rows(end_date_text: str) -> list[dict]:
+    rows: list[dict] = []
+    end_date_value = date.fromisoformat(end_date_text)
+
+    for account in get_accounts():
+        latest_snapshot = get_latest_account_snapshot(account["id"])
+        if latest_snapshot is None:
+            rows.append(
+                {
+                    "account_name": account["name"],
+                    "status_text": "Snapshot mancante",
+                    "status_color": "#8b5e00",
+                    "message": "Serve almeno uno snapshot per calcolare il forecast.",
+                }
+            )
+            continue
+
+        start_date_value = date.fromisoformat(latest_snapshot["snapshot_date"])
+        if end_date_value < start_date_value:
+            rows.append(
+                {
+                    "account_name": account["name"],
+                    "status_text": "Intervallo non valido",
+                    "status_color": "#8a1c1c",
+                    "message": "La data finale dashboard e prima dell'ultimo snapshot.",
+                }
+            )
+            continue
+
+        result = build_account_forecast(account["name"], start_date_value, end_date_value)
+        status_text, status_color = get_dashboard_status(result.min_balance)
+        rows.append(
+            {
+                "account_name": account["name"],
+                "status_text": status_text,
+                "status_color": status_color,
+                "snapshot_date": latest_snapshot["snapshot_date"],
+                "opening_balance": result.opening_balance,
+                "closing_balance": result.closing_balance,
+                "min_balance": result.min_balance,
+                "min_balance_date": result.min_balance_date.isoformat(),
+                "max_balance": result.max_balance,
+                "max_balance_date": result.max_balance_date.isoformat(),
+                "events": len(result.events),
+            }
+        )
+
+    return rows
+
+
 def refresh_all_rule_views() -> None:
     render_accounts.refresh()
     render_rule_stats.refresh(rule_state["account_filter"])
@@ -53,6 +111,7 @@ def refresh_snapshot_views() -> None:
     render_accounts.refresh()
     render_snapshots.refresh(snapshot_state["account_filter"])
     refresh_forecast_defaults()
+    render_dashboard.refresh()
 
 
 def refresh_forecast_defaults() -> None:
@@ -156,6 +215,9 @@ forecast_state = {
     "end_date": date(date.today().year, 12, 31).isoformat(),
     "opening_balance": "",
     "result": None,
+}
+dashboard_state = {
+    "end_date": date(date.today().year, 12, 31).isoformat(),
 }
 
 if get_account_by_name("Fineco") is None and get_accounts():
@@ -286,11 +348,17 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 for title, value in (
                     ("Saldo iniziale", f"{result.opening_balance:.2f} EUR"),
                     ("Saldo finale", f"{result.closing_balance:.2f} EUR"),
+                    ("Minimo", f"{result.min_balance:.2f} EUR"),
                     ("Eventi", str(len(result.events))),
                 ):
                     with ui.card().classes("min-w-[180px] flex-1"):
                         ui.label(title).style("color: #6b5b53; font-size: 14px")
                         ui.label(value).style("font-size: 26px; font-weight: 700; color: #2f241f")
+
+            with ui.card().classes("w-full"):
+                ui.label(
+                    f"Punto piu basso il {result.min_balance_date.isoformat()} | punto piu alto il {result.max_balance_date.isoformat()}"
+                ).style("color: #7a6a62; font-size: 14px")
 
             running_balance = result.opening_balance
             for event in result.events:
@@ -303,6 +371,55 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     ui.label(f"{label} | saldo progressivo {running_balance:.2f} EUR").style(
                         "color: #7a6a62; font-size: 13px"
                     )
+                    if event.event_type == "card_settlement" and event.related_descriptions:
+                        preview = ", ".join(event.related_descriptions[:4])
+                        if event.related_count > 4:
+                            preview += f" + altre {event.related_count - 4}"
+                        ui.label(f"Include {event.related_count} spese carta: {preview}").style(
+                            "color: #7a6a62; font-size: 13px"
+                        )
+
+    @ui.refreshable
+    def render_dashboard() -> None:
+        try:
+            rows = build_dashboard_rows(dashboard_state["end_date"])
+        except ValueError:
+            with ui.card().classes("w-full"):
+                ui.label("La data dashboard deve essere nel formato YYYY-MM-DD.")
+            return
+
+        with ui.column().classes("w-full gap-3"):
+            for row in rows:
+                with ui.card().classes("w-full"):
+                    ui.label(row["account_name"]).style("font-size: 20px; font-weight: 600")
+                    ui.label(row["status_text"]).style(
+                        f"color: {row['status_color']}; font-size: 14px; font-weight: 700"
+                    )
+
+                    if "message" in row:
+                        ui.label(row["message"]).style("color: #7a6a62; font-size: 13px")
+                        continue
+
+                    ui.label(
+                        f"Da snapshot {row['snapshot_date']} | iniziale {row['opening_balance']:.2f} EUR | finale {row['closing_balance']:.2f} EUR"
+                    ).style("color: #5f5048")
+                    ui.label(
+                        f"Minimo {row['min_balance']:.2f} EUR il {row['min_balance_date']} | Massimo {row['max_balance']:.2f} EUR il {row['max_balance_date']} | Eventi {row['events']}"
+                    ).style("color: #7a6a62; font-size: 13px")
+
+    with ui.card().classes("w-full"):
+        ui.label("Dashboard").style("font-size: 22px; font-weight: 600")
+        ui.label(
+            "Vista sintetica dei conti usando l'ultimo snapshot disponibile come punto di partenza."
+        ).style("color: #6b5b53")
+
+        with ui.row().classes("w-full items-end gap-4"):
+            ui.input(
+                label="Data finale dashboard",
+                value=dashboard_state["end_date"],
+                on_change=lambda event: dashboard_state.__setitem__("end_date", event.value),
+            ).classes("min-w-[200px]")
+            ui.button("Aggiorna dashboard", on_click=lambda: render_dashboard.refresh())
 
     with ui.card().classes("w-full"):
         with ui.row().classes("w-full items-center justify-between gap-4"):
@@ -402,6 +519,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
             ui.button("Calcola forecast", on_click=run_forecast)
 
     render_accounts()
+    render_dashboard()
     render_rule_stats(rule_state["account_filter"])
     render_rules(rule_state["account_filter"])
     render_snapshots(snapshot_state["account_filter"])

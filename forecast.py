@@ -16,6 +16,8 @@ class ForecastEvent:
     amount: float
     event_type: str
     source_rule_id: int | None = None
+    related_descriptions: list[str] | None = None
+    related_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,10 @@ class ForecastResult:
     end_date: date
     opening_balance: float
     closing_balance: float
+    min_balance: float
+    min_balance_date: date
+    max_balance: float
+    max_balance_date: date
     events: list[ForecastEvent]
 
 
@@ -160,6 +166,8 @@ def build_account_forecast(
                 amount=total_amount,
                 event_type="card_settlement",
                 source_rule_id=None,
+                related_descriptions=[event.description for event in spends],
+                related_count=len(spends),
             )
         )
 
@@ -169,8 +177,19 @@ def build_account_forecast(
     )
 
     closing_balance = opening_balance
+    min_balance = opening_balance
+    min_balance_date = start_date
+    max_balance = opening_balance
+    max_balance_date = start_date
+
     for event in events:
         closing_balance += event.amount
+        if closing_balance < min_balance:
+            min_balance = closing_balance
+            min_balance_date = event.event_date
+        if closing_balance > max_balance:
+            max_balance = closing_balance
+            max_balance_date = event.event_date
 
     return ForecastResult(
         account_name=account_name,
@@ -178,5 +197,9 @@ def build_account_forecast(
         end_date=end_date,
         opening_balance=opening_balance,
         closing_balance=closing_balance,
+        min_balance=min_balance,
+        min_balance_date=min_balance_date,
+        max_balance=max_balance,
+        max_balance_date=max_balance_date,
         events=events,
     )
