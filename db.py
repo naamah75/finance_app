@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 
@@ -159,11 +160,12 @@ def get_accounts() -> list[sqlite3.Row]:
     return rows
 
 
-def get_transaction_rules() -> list[sqlite3.Row]:
+def get_transaction_rules(active_only: bool = False) -> list[sqlite3.Row]:
     conn = get_connection()
     cur = conn.cursor()
+    filters = "WHERE transaction_rules.active = 1" if active_only else ""
     cur.execute(
-        """
+        f"""
         SELECT
             transaction_rules.id,
             accounts.name AS account_name,
@@ -178,13 +180,33 @@ def get_transaction_rules() -> list[sqlite3.Row]:
             transaction_rules.end_date,
             transaction_rules.installments_total,
             transaction_rules.card_settlement_day,
+            transaction_rules.active,
             transaction_rules.source_sheet
         FROM transaction_rules
         JOIN accounts ON accounts.id = transaction_rules.account_id
-        WHERE transaction_rules.active = 1
+        {filters}
         ORDER BY accounts.name, transaction_rules.frequency, transaction_rules.day_of_month, transaction_rules.description
         """
     )
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def set_transaction_rule_active(rule_id: int, active: bool) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE transaction_rules SET active = ? WHERE id = ?",
+        (1 if active else 0, rule_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def is_rule_expired(end_date: str | None, today: date | None = None) -> bool:
+    if not end_date:
+        return False
+
+    reference_date = today or date.today()
+    return date.fromisoformat(end_date) < reference_date
