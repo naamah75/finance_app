@@ -9,7 +9,9 @@ Build a simple personal finance app that starts local-first, stays easy to run, 
 - The app is a working prototype in `app.py`
 - UI uses NiceGUI
 - Data uses local SQLite in `finance.db`
-- The data model is evolving from a simple `accounts` table toward reusable planning rules and balance snapshots
+- The data model now includes `accounts`, `transaction_rules`, and `account_snapshots`
+- Excel import currently reads compact rules from `xlsx` via `import_excel.py`
+- A first forecast engine draft lives in `forecast.py`
 
 ## Main principles
 
@@ -33,6 +35,7 @@ Build a simple personal finance app that starts local-first, stays easy to run, 
 - Treat `finance.db` as local runtime data unless the user explicitly wants it versioned
 - Do not commit secrets or local environment files
 - Keep `.gitignore` updated when new local/generated files appear
+- Treat the personal planning workbook as local input data; do not commit the real `Piano economico.xlsx`
 
 ## How to run
 
@@ -46,6 +49,12 @@ Start the app:
 
 ```bash
 python app.py
+```
+
+Import the workbook:
+
+```bash
+python import_excel.py "Piano economico.xlsx"
 ```
 
 Default local URL:
@@ -70,6 +79,7 @@ Default local URL:
 - Store planned rules in a single table such as `transaction_rules`, with monthly and yearly frequencies instead of separate tables per sheet
 - Store manual or reconciled balances as dated snapshots in a table such as `account_snapshots`
 - Future balance projections should start from a manually entered or reconciled account balance and apply the imported rules dynamically
+- A snapshot means: on that exact date, the real account balance has been manually checked or reconciled and should be trusted as the forecasting starting point
 
 ## Payment handling rules
 
@@ -78,6 +88,16 @@ Default local URL:
 - If `Pagamento` is `Carta`, the movement is first accumulated as card spending for the referenced bank account
 - Card spending is not charged immediately to the account balance; it is aggregated and charged on day `10` of the following month as the credit card debit
 - This card-settlement behavior should be modeled in forecasting logic, while the imported rule should preserve the original payment method and target account
+
+## Current implementation notes
+
+- `db.py` owns schema creation and basic SQLite helpers
+- `import_excel.py` is intended to be safe to rerun; for now it replaces imported `transaction_rules` from the latest workbook contents
+- `app.py` already includes a rule management view with filter by account, manual enable/disable, and automatic expired-state detection from `end_date`
+- Keep manual disable (`active`) separate from automatic expiry; do not overwrite manual intent when a rule becomes expired
+- `forecast.py` is the first draft of the projection engine and expands compact rules into dated forecast events
+- In the current forecast draft, `Conto` rules generate direct account events and `Carta` rules are aggregated into a single debit on day `10` of the following month
+- When the workbook changes over time, re-run the import instead of editing imported rules manually in the database unless a future feature explicitly supports local overrides
 
 ## Agent instructions
 
@@ -90,6 +110,7 @@ Default local URL:
 - Prefer small modules such as `db.py` and `import_excel.py` when they keep `app.py` simple
 - When importing from Excel, prefer `xlsx` support and keep the importer safe to rerun
 - Preserve enough imported metadata to support later forecasting and reconciliation work
+- Prefer forecast logic in dedicated modules such as `forecast.py` instead of embedding it directly in the UI layer
 
 ## Context from the initial setup
 
