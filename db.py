@@ -94,8 +94,67 @@ def init_db() -> None:
 
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS forecast_event_overrides (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_id INTEGER NOT NULL,
+            account_id INTEGER NOT NULL,
+            original_event_date TEXT NOT NULL,
+            override_description TEXT,
+            override_event_date TEXT,
+            override_amount REAL,
+            resolution_mode TEXT NOT NULL DEFAULT 'auto',
+            status TEXT NOT NULL DEFAULT 'open',
+            FOREIGN KEY (rule_id) REFERENCES transaction_rules(id),
+            FOREIGN KEY (account_id) REFERENCES accounts(id)
+        )
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS manual_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            account_id INTEGER NOT NULL,
+            event_date TEXT NOT NULL,
+            description TEXT NOT NULL,
+            amount REAL NOT NULL,
+            payment_method TEXT,
+            status TEXT NOT NULL DEFAULT 'open',
+            note TEXT,
+            FOREIGN KEY (account_id) REFERENCES accounts(id)
+        )
+        """
+    )
+
+    cur.execute("PRAGMA table_info(forecast_event_overrides)")
+    override_columns = {row[1] for row in cur.fetchall()}
+    if "override_description" not in override_columns:
+        cur.execute(
+            "ALTER TABLE forecast_event_overrides ADD COLUMN override_description TEXT"
+        )
+    if "resolution_mode" not in override_columns:
+        cur.execute(
+            "ALTER TABLE forecast_event_overrides ADD COLUMN resolution_mode TEXT NOT NULL DEFAULT 'auto'"
+        )
+
+    cur.execute(
+        """
         CREATE UNIQUE INDEX IF NOT EXISTS idx_account_snapshots_unique
         ON account_snapshots(account_id, snapshot_date)
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_forecast_event_overrides_unique
+        ON forecast_event_overrides(rule_id, account_id, original_event_date)
+        """
+    )
+
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_manual_events_account_date
+        ON manual_events(account_id, event_date)
         """
     )
 
@@ -103,7 +162,9 @@ def init_db() -> None:
     conn.close()
 
 
-def upsert_account(name: str, balance: float | None = None, overdraft_limit: float | None = None) -> int:
+def upsert_account(
+    name: str, balance: float | None = None, overdraft_limit: float | None = None
+) -> int:
     conn = get_connection()
     cur = conn.cursor()
 
@@ -192,7 +253,10 @@ def get_accounts() -> list[sqlite3.Row]:
 def get_account_by_name(name: str) -> sqlite3.Row | None:
     conn = get_connection()
     cur = conn.cursor()
-    cur.execute("SELECT id, name, balance, overdraft_limit FROM accounts WHERE name = ?", (name,))
+    cur.execute(
+        "SELECT id, name, balance, overdraft_limit FROM accounts WHERE name = ?",
+        (name,),
+    )
     row = cur.fetchone()
     conn.close()
     return row
@@ -231,6 +295,176 @@ def set_setting(key: str, value: str) -> None:
         """,
         (key, value),
     )
+    conn.commit()
+    conn.close()
+
+
+def get_forecast_event_overrides(account_id: int) -> list[sqlite3.Row]:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            id,
+            rule_id,
+            account_id,
+            original_event_date,
+            override_description,
+            override_event_date,
+            override_amount,
+            resolution_mode,
+            status
+        FROM forecast_event_overrides
+        WHERE account_id = ?
+        ORDER BY original_event_date, id
+        """,
+        (account_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_forecast_event_override(
+    rule_id: int, account_id: int, original_event_date: str
+) -> sqlite3.Row | None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            id,
+            rule_id,
+            account_id,
+            original_event_date,
+            override_description,
+            override_event_date,
+            override_amount,
+            resolution_mode,
+            status
+        FROM forecast_event_overrides
+        WHERE rule_id = ? AND account_id = ? AND original_event_date = ?
+        """,
+        (rule_id, account_id, original_event_date),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def upsert_forecast_event_override(
+    rule_id: int,
+    account_id: int,
+    original_event_date: str,
+    override_description: str | None = None,
+    override_event_date: str | None = None,
+    override_amount: float | None = None,
+    resolution_mode: str = "auto",
+    status: str = "open",
+) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO forecast_event_overrides(
+            rule_id,
+            account_id,
+            original_event_date,
+            override_description,
+            override_event_date,
+            override_amount,
+            resolution_mode,
+            status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(rule_id, account_id, original_event_date)
+        DO UPDATE SET
+            override_description = excluded.override_description,
+            override_event_date = excluded.override_event_date,
+            override_amount = excluded.override_amount,
+            resolution_mode = excluded.resolution_mode,
+            status = excluded.status
+        """,
+        (
+            rule_id,
+            account_id,
+            original_event_date,
+            override_description,
+            override_event_date,
+            override_amount,
+            resolution_mode,
+            status,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_forecast_event_override(
+    rule_id: int, account_id: int, original_event_date: str
+) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM forecast_event_overrides WHERE rule_id = ? AND account_id = ? AND original_event_date = ?",
+        (rule_id, account_id, original_event_date),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_manual_events(
+    account_id: int, start_date: str | None = None, end_date: str | None = None
+) -> list[sqlite3.Row]:
+    conn = get_connection()
+    cur = conn.cursor()
+
+    query = """
+        SELECT id, account_id, event_date, description, amount, payment_method, status, note
+        FROM manual_events
+        WHERE account_id = ?
+    """
+    params: list[object] = [account_id]
+
+    if start_date is not None:
+        query += " AND event_date >= ?"
+        params.append(start_date)
+    if end_date is not None:
+        query += " AND event_date <= ?"
+        params.append(end_date)
+
+    query += " ORDER BY event_date, id"
+    cur.execute(query, tuple(params))
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def add_manual_event(
+    account_id: int,
+    event_date: str,
+    description: str,
+    amount: float,
+    payment_method: str | None = None,
+    status: str = "open",
+    note: str | None = None,
+) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO manual_events(account_id, event_date, description, amount, payment_method, status, note)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (account_id, event_date, description, amount, payment_method, status, note),
+    )
+    conn.commit()
+    conn.close()
+
+
+def set_manual_event_status(event_id: int, status: str) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("UPDATE manual_events SET status = ? WHERE id = ?", (status, event_id))
     conn.commit()
     conn.close()
 
@@ -279,7 +513,9 @@ def set_transaction_rule_active(rule_id: int, active: bool) -> None:
     conn.close()
 
 
-def upsert_account_snapshot(account_id: int, snapshot_date: str, balance: float, note: str | None = None) -> None:
+def upsert_account_snapshot(
+    account_id: int, snapshot_date: str, balance: float, note: str | None = None
+) -> None:
     conn = get_connection()
     cur = conn.cursor()
     cur.execute(
@@ -295,7 +531,9 @@ def upsert_account_snapshot(account_id: int, snapshot_date: str, balance: float,
     conn.close()
 
 
-def get_latest_account_snapshot(account_id: int, on_or_before: str | None = None) -> sqlite3.Row | None:
+def get_latest_account_snapshot(
+    account_id: int, on_or_before: str | None = None
+) -> sqlite3.Row | None:
     conn = get_connection()
     cur = conn.cursor()
 

@@ -3,9 +3,11 @@ from datetime import date, datetime
 from nicegui import ui
 
 from db import (
+    add_manual_event,
+    delete_forecast_event_override,
     get_account_by_name,
-    get_account_snapshots,
     get_accounts,
+    get_forecast_event_override,
     get_latest_account_snapshot,
     get_setting,
     get_transaction_rules,
@@ -14,6 +16,7 @@ from db import (
     set_account_overdraft_limit,
     set_setting,
     set_transaction_rule_active,
+    upsert_forecast_event_override,
     upsert_account_snapshot,
 )
 from forecast import build_account_forecast
@@ -143,9 +146,12 @@ def sync_snapshot_form(account_name: str) -> None:
 def select_active_account(account_name: str) -> None:
     dashboard_state["account_name"] = account_name
     forecast_state["account_name"] = account_name
+    override_state["selected_key"] = ""
     sync_snapshot_form(account_name)
     refresh_forecast_defaults()
     render_dashboard_header.refresh()
+    render_forecast.refresh()
+    render_override_editor.refresh()
 
 
 def refresh_all_rule_views() -> None:
@@ -158,6 +164,7 @@ def refresh_snapshot_views() -> None:
     refresh_forecast_defaults()
     render_settings.refresh()
     render_forecast.refresh()
+    render_override_editor.refresh()
 
 
 def refresh_forecast_defaults() -> None:
@@ -270,6 +277,7 @@ def save_overdraft_limit(account_name: str, overdraft_text: str) -> None:
     render_settings.refresh()
     try_run_default_forecast()
     render_forecast.refresh()
+    render_override_editor.refresh()
 
 
 def save_forecast_window_months(value_text: str) -> None:
@@ -308,6 +316,7 @@ def save_warning_margin(value_text: str) -> None:
     try_run_default_forecast()
     render_settings.refresh()
     render_forecast.refresh()
+    render_override_editor.refresh()
     ui.notify("Soglia attenzione aggiornata.", color="positive")
 
 
@@ -340,10 +349,154 @@ def run_forecast() -> None:
             opening_balance,
         )
         render_forecast.refresh()
+        render_override_editor.refresh()
     except Exception as exc:
         forecast_state["result"] = None
         render_forecast.refresh()
+        render_override_editor.refresh()
         ui.notify(str(exc), color="negative")
+
+
+def save_manual_event() -> None:
+    account = get_account_by_name(dashboard_state["account_name"])
+    if account is None:
+        ui.notify("Conto non trovato.", color="negative")
+        return
+
+    try:
+        event_date = parse_ui_date(manual_event_state["event_date"]).isoformat()
+        amount = float(manual_event_state["amount"].replace(",", "."))
+    except ValueError:
+        ui.notify("Controlla data e importo del movimento manuale.", color="negative")
+        return
+
+    description = manual_event_state["description"].strip()
+    if not description:
+        ui.notify(
+            "Inserisci una descrizione per il movimento manuale.", color="negative"
+        )
+        return
+
+    add_manual_event(
+        account_id=account["id"],
+        event_date=event_date,
+        description=description,
+        amount=amount,
+        payment_method=manual_event_state["payment_method"] or None,
+        note=manual_event_state["note"].strip() or None,
+    )
+    manual_event_state["description"] = ""
+    manual_event_state["amount"] = ""
+    manual_event_state["note"] = ""
+    ui.notify("Movimento manuale aggiunto.", color="positive")
+    try_run_default_forecast()
+    render_forecast.refresh()
+
+
+def select_override_event(value: str | None, refresh_editor: bool = True) -> None:
+    override_state["selected_key"] = value or ""
+    selected_row = next(
+        (
+            row
+            for row in override_state["rows"]
+            if row["selection_key"] == override_state["selected_key"]
+        ),
+        None,
+    )
+
+    if selected_row is None:
+        override_state["rule_id"] = None
+        override_state["original_event_date"] = ""
+        override_state["override_description"] = ""
+        override_state["override_event_date"] = ""
+        override_state["override_amount"] = ""
+        override_state["resolution_mode"] = "auto"
+        override_state["status"] = "open"
+    else:
+        override_state["rule_id"] = selected_row["source_rule_id"]
+        override_state["original_event_date"] = selected_row["original_event_date"]
+        override_state["override_description"] = (
+            selected_row["override_description"] or selected_row["description"]
+        )
+        override_state["override_event_date"] = (
+            selected_row["override_event_date"] or selected_row["date"]
+        )
+        override_state["override_amount"] = (
+            f"{selected_row['override_amount']:.2f}"
+            if selected_row["override_amount"] is not None
+            else ""
+        )
+        override_state["resolution_mode"] = (
+            selected_row["override_resolution_mode"] or "auto"
+        )
+        override_state["status"] = selected_row["override_status"] or "open"
+
+    if refresh_editor:
+        render_override_editor.refresh()
+
+
+def save_event_override() -> None:
+    account = get_account_by_name(dashboard_state["account_name"])
+    rule_id = override_state["rule_id"]
+    original_event_date = override_state["original_event_date"]
+    if account is None or rule_id is None or not original_event_date:
+        ui.notify("Seleziona prima un movimento modificabile.", color="negative")
+        return
+
+    override_description = override_state["override_description"].strip()
+    override_event_date = override_state["override_event_date"].strip()
+    override_amount_text = override_state["override_amount"].strip()
+    resolution_mode = override_state["resolution_mode"]
+    status = override_state["status"]
+
+    try:
+        parsed_override_date = (
+            parse_ui_date(override_event_date).isoformat()
+            if override_event_date
+            else None
+        )
+        parsed_override_amount = (
+            float(override_amount_text.replace(",", "."))
+            if override_amount_text
+            else None
+        )
+    except ValueError:
+        ui.notify("Controlla data e importo override.", color="negative")
+        return
+
+    if status == "open" and parsed_override_date is None:
+        ui.notify("Per un override aperto serve una data prevista.", color="negative")
+        return
+
+    upsert_forecast_event_override(
+        rule_id=rule_id,
+        account_id=account["id"],
+        original_event_date=original_event_date,
+        override_description=override_description or None,
+        override_event_date=parsed_override_date,
+        override_amount=parsed_override_amount,
+        resolution_mode=resolution_mode,
+        status=status,
+    )
+    ui.notify("Override salvato.", color="positive")
+    try_run_default_forecast()
+    render_forecast.refresh()
+    render_override_editor.refresh()
+
+
+def clear_event_override() -> None:
+    account = get_account_by_name(dashboard_state["account_name"])
+    rule_id = override_state["rule_id"]
+    original_event_date = override_state["original_event_date"]
+    if account is None or rule_id is None or not original_event_date:
+        ui.notify("Seleziona prima un movimento modificabile.", color="negative")
+        return
+
+    delete_forecast_event_override(rule_id, account["id"], original_event_date)
+    ui.notify("Override rimosso.", color="positive")
+    try_run_default_forecast()
+    render_forecast.refresh()
+    render_override_editor.refresh()
 
 
 init_db()
@@ -369,6 +522,24 @@ dashboard_state = {
 settings_state = {
     "forecast_window_months": str(get_forecast_window_months()),
     "warning_margin": str(int(get_warning_margin())),
+}
+manual_event_state = {
+    "event_date": format_ui_date(date.today()),
+    "description": "",
+    "amount": "",
+    "payment_method": "Conto",
+    "note": "",
+}
+override_state = {
+    "rows": [],
+    "selected_key": "",
+    "rule_id": None,
+    "original_event_date": "",
+    "override_description": "",
+    "override_event_date": "",
+    "override_amount": "",
+    "resolution_mode": "auto",
+    "status": "open",
 }
 
 if get_account_by_name("Fineco") is None and get_accounts():
@@ -499,12 +670,36 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 forecast_rows.append(
                     {
                         "id": index,
+                        "selection_key": f"{event.source_rule_id or 'settlement'}|{event.original_event_date.isoformat()}|{index}",
                         "row_bg": month_background(event.event_date.month),
                         "month_break": previous_month_key is not None
                         and month_key != previous_month_key,
                         "date": format_ui_date(event.event_date),
                         "type": type_icon,
                         "description": event.description,
+                        "original_description": event.original_description,
+                        "source_rule_id": event.source_rule_id,
+                        "source_manual_event_id": event.source_manual_event_id,
+                        "editable": event.source_rule_id is not None,
+                        "is_manual_event": event.source_manual_event_id is not None,
+                        "original_event_date": event.original_event_date.isoformat(),
+                        "original_event_date_label": format_ui_date(
+                            event.original_event_date
+                        ),
+                        "original_amount": event.original_amount,
+                        "override_id": event.override_id,
+                        "override_status": event.override_status,
+                        "override_resolution_mode": event.override_resolution_mode,
+                        "override_description": event.override_description,
+                        "override_event_date": format_ui_date(event.override_event_date)
+                        if event.override_event_date
+                        else "",
+                        "override_amount": event.override_amount,
+                        "carried_overdue": event.carried_overdue,
+                        "has_override": event.override_id is not None,
+                        "description_changed": bool(event.override_description),
+                        "date_changed": event.override_event_date is not None,
+                        "amount_changed": event.override_amount is not None,
                         "amount_value": round(event.amount, 2),
                         "amount": format_currency(event.amount),
                         "balance_value": round(running_balance, 2),
@@ -517,6 +712,12 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
             table = ui.table(
                 columns=[
                     {"name": "date", "label": "Data", "field": "date", "align": "left"},
+                    {
+                        "name": "schedule",
+                        "label": "Programma",
+                        "field": "override_status",
+                        "align": "center",
+                    },
                     {
                         "name": "type",
                         "label": "Tipo",
@@ -553,15 +754,51 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 pagination=34,
             ).classes("w-full rounded-xl overflow-hidden")
             table.style("font-family: 'IBM Plex Mono', monospace; font-size: 11px")
+            override_state["rows"] = forecast_rows
+            available_rows = [row for row in forecast_rows if row["editable"]]
+            if override_state["selected_key"] and not any(
+                row["selection_key"] == override_state["selected_key"]
+                for row in available_rows
+            ):
+                override_state["selected_key"] = ""
+            if not override_state["selected_key"] and available_rows:
+                select_override_event(
+                    available_rows[0]["selection_key"], refresh_editor=False
+                )
             table.add_slot(
                 "body",
                 r"""
-                <q-tr :props="props" :style="'background-color:' + props.row.row_bg + '; border-top:' + (props.row.month_break ? '4px solid #8f7f73' : '0')">
+                <q-tr :props="props" @click="() => $parent.$emit('select_override_row', props.row.selection_key)" class="cursor-pointer" :style="'background-color:' + props.row.row_bg + '; border-top:' + (props.row.month_break ? '4px solid #8f7f73' : '0')">
                     <q-td key="date" :props="props" style="padding-top: 4px; padding-bottom: 4px">{{ props.row.date }}</q-td>
+                    <q-td key="schedule" :props="props" class="text-center">
+                        <q-icon v-if="props.row.is_manual_event" name="add_task" color="teal" size="sm">
+                            <q-tooltip>Movimento manuale una tantum</q-tooltip>
+                        </q-icon>
+                        <template v-else-if="props.row.has_override">
+                            <q-icon v-if="props.row.override_resolution_mode === 'manual' && props.row.override_status === 'open'" name="push_pin" color="warning" size="xs" class="q-mr-xs">
+                                <q-tooltip>Override manuale aperto. Originale: {{ props.row.original_event_date_label }} | {{ props.row.original_description }} | {{ props.row.original_amount.toFixed(2) }}</q-tooltip>
+                            </q-icon>
+                            <q-icon v-if="props.row.date_changed" name="event_repeat" color="secondary" size="xs" class="q-mr-xs">
+                                <q-tooltip>Data modificata. Originale: {{ props.row.original_event_date_label }}</q-tooltip>
+                            </q-icon>
+                            <q-icon v-if="props.row.amount_changed" name="euro" color="secondary" size="xs" class="q-mr-xs">
+                                <q-tooltip>Importo modificato. Originale: {{ props.row.original_amount.toFixed(2) }}</q-tooltip>
+                            </q-icon>
+                            <q-icon v-if="props.row.description_changed" name="edit_note" color="secondary" size="xs">
+                                <q-tooltip>Descrizione modificata. Originale: {{ props.row.original_description }}</q-tooltip>
+                            </q-icon>
+                        </template>
+                        <q-icon v-else name="radio_button_unchecked" color="grey-5" size="xs" />
+                    </q-td>
                     <q-td key="type" :props="props" class="text-center">
                         <q-icon :name="props.row.type" :color="props.row.amount_value < 0 ? 'negative' : 'positive'" size="sm" />
                     </q-td>
-                    <q-td key="description" :props="props" style="padding-top: 4px; padding-bottom: 4px">{{ props.row.description }}</q-td>
+                    <q-td key="description" :props="props" style="padding-top: 4px; padding-bottom: 4px">
+                        <div class="row items-center no-wrap">
+                            <q-icon v-if="props.row.carried_overdue" name="history" color="warning" size="xs" class="q-mr-xs" />
+                            <span>{{ props.row.description }}</span>
+                        </div>
+                    </q-td>
                     <q-td key="amount" :props="props" style="padding-top: 4px; padding-bottom: 4px" :class="props.row.amount_value < 0 ? 'text-[#8a1c1c]' : 'text-[#1f7a1f]'">{{ props.row.amount }}</q-td>
                     <q-td key="balance" :props="props" style="padding-top: 4px; padding-bottom: 4px" :class="props.row.balance_value < 0 ? 'text-[#8a1c1c] font-semibold' : 'text-[#2f241f] font-semibold'">{{ props.row.balance }}</q-td>
                     <q-td key="status" :props="props" class="text-center">
@@ -570,24 +807,137 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 </q-tr>
                 """,
             )
+            table.on(
+                "select_override_row", lambda event: select_override_event(event.args)
+            )
+
+    @ui.refreshable
+    def render_manual_event_editor() -> None:
+        with ui.card().classes("w-full"):
+            ui.label("Aggiungi movimento una tantum").style(
+                "font-size: 18px; font-weight: 600"
+            )
+            with ui.row().classes("w-full items-end gap-4"):
+                ui.input(
+                    label="Data movimento",
+                    value=manual_event_state["event_date"],
+                    on_change=lambda event: manual_event_state.__setitem__(
+                        "event_date", event.value
+                    ),
+                ).classes("min-w-[170px]")
+                ui.input(
+                    label="Descrizione una tantum",
+                    value=manual_event_state["description"],
+                    on_change=lambda event: manual_event_state.__setitem__(
+                        "description", event.value
+                    ),
+                ).classes("min-w-[260px]")
+                ui.input(
+                    label="Importo",
+                    value=manual_event_state["amount"],
+                    on_change=lambda event: manual_event_state.__setitem__(
+                        "amount", event.value
+                    ),
+                ).classes("min-w-[140px]")
+                ui.select(
+                    options=["Conto", "Carta"],
+                    value=manual_event_state["payment_method"],
+                    on_change=lambda event: manual_event_state.__setitem__(
+                        "payment_method", event.value
+                    ),
+                ).classes("min-w-[140px]")
+                ui.button(icon="add", on_click=save_manual_event).props("round flat")
+
+    @ui.refreshable
+    def render_override_editor() -> None:
+        editable_rows = [row for row in override_state["rows"] if row["editable"]]
+
+        with ui.card().classes("w-full"):
+            ui.label("Personalizzazione movimento").style(
+                "font-size: 18px; font-weight: 600"
+            )
+            if not editable_rows:
+                ui.label(
+                    "Nessun movimento modificabile nella finestra di previsione."
+                ).style("color: #6b5b53")
+                return
+
+            event_options = {
+                row[
+                    "selection_key"
+                ]: f"{row['date']} | {row['description']} | {row['amount']}"
+                for row in editable_rows
+            }
+            ui.select(
+                options=event_options,
+                value=override_state["selected_key"] or next(iter(event_options)),
+                label="Movimento da modificare",
+                on_change=lambda event: select_override_event(event.value),
+            ).classes("w-full")
+
+            ui.label(
+                "Auto: l'override segue la normale pianificazione. Manuale: resta pendente finche non lo segni come risolto o annullato."
+            ).style("color: #6b5b53; font-size: 13px")
+
+            with ui.row().classes("w-full items-end gap-4 mt-3"):
+                ui.input(
+                    label="Nuova descrizione",
+                    value=override_state["override_description"],
+                    on_change=lambda event: override_state.__setitem__(
+                        "override_description", event.value
+                    ),
+                ).classes("min-w-[260px]")
+                ui.input(
+                    label="Nuova data",
+                    value=override_state["override_event_date"],
+                    on_change=lambda event: override_state.__setitem__(
+                        "override_event_date", event.value
+                    ),
+                ).classes("min-w-[170px]")
+                ui.input(
+                    label="Nuovo importo",
+                    value=override_state["override_amount"],
+                    on_change=lambda event: override_state.__setitem__(
+                        "override_amount", event.value
+                    ),
+                ).classes("min-w-[150px]")
+                ui.select(
+                    options={"auto": "Auto", "manual": "Manuale"},
+                    value=override_state["resolution_mode"],
+                    label="Risoluzione",
+                    on_change=lambda event: override_state.__setitem__(
+                        "resolution_mode", event.value
+                    ),
+                ).classes("min-w-[150px]")
+                ui.select(
+                    options={
+                        "open": "Aperto",
+                        "resolved": "Risolto",
+                        "cancelled": "Annullato",
+                    },
+                    value=override_state["status"],
+                    label="Stato",
+                    on_change=lambda event: override_state.__setitem__(
+                        "status", event.value
+                    ),
+                ).classes("min-w-[150px]")
+                ui.button(icon="save", on_click=save_event_override).props("round flat")
+                ui.button(icon="delete", on_click=clear_event_override).props(
+                    "round flat"
+                )
 
     @ui.refreshable
     def render_dashboard_header() -> None:
-        account = get_account_by_name(dashboard_state["account_name"])
-
         with ui.card().classes("w-full"):
             with ui.column().classes("w-full gap-3"):
-                with ui.column().classes("gap-1"):
-                    ui.label(dashboard_state["account_name"]).style(
-                        "font-size: 31px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: #2b201c; font-family: 'IBM Plex Mono', monospace"
-                    )
                 with ui.row().classes("items-center gap-3"):
                     ui.select(
                         options=[account_row["name"] for account_row in get_accounts()],
                         value=dashboard_state["account_name"],
-                        label="Conto",
                         on_change=lambda event: select_active_account(event.value),
-                    ).classes("min-w-[200px]")
+                    ).classes("min-w-[240px]").style(
+                        "font-family: 'IBM Plex Mono', monospace; font-size: 28px; text-transform: uppercase; letter-spacing: 0.08em"
+                    )
                     ui.button(
                         icon="refresh",
                         on_click=lambda: (
@@ -680,6 +1030,8 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
         with ui.tab_panel(dashboard_tab).classes("gap-4"):
             render_dashboard_header()
             render_forecast()
+            render_manual_event_editor()
+            render_override_editor()
 
         with ui.tab_panel(rules_tab).classes("gap-4"):
             with ui.card().classes("w-full"):

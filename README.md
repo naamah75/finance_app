@@ -10,6 +10,8 @@ The project is no longer just a prototype. It now includes:
 - local SQLite database in `finance.db`
 - reusable compact planning rules in `transaction_rules`
 - dated balance checkpoints in `account_snapshots`
+- per-event overrides in `forecast_event_overrides`
+- one-off planned movements in `manual_events`
 - app settings in SQLite for forecast behavior
 - Excel import from `xlsx` via `import_excel.py`
 - first forecast engine in `forecast.py`
@@ -18,7 +20,7 @@ The project is no longer just a prototype. It now includes:
 
 The app currently has three main tabs:
 
-- `Movimenti`: one account at a time, with snapshot editing and movement-by-movement forecast table
+- `Movimenti`: one account at a time, with snapshot editing, one-off movement entry, event customization, and movement-by-movement forecast table
 - `Regole`: imported rules, manual enable/disable, expired-state handling
 - `Impostazioni`: account overdraft values, default forecast window, and warning threshold
 
@@ -32,11 +34,24 @@ The `Movimenti` tab is currently the main operational view.
 - `OperazioniSingole` becomes yearly rules
 - Real balances are stored as snapshots with a date
 - Forecasts start from a manual or reconciled balance snapshot
+- Single generated occurrences can be customized without changing the base rule
+- One-off user-entered planned movements are stored separately from imported rules
 
 ## Payment behavior
 
 - If `Pagamento` is `Conto`, the movement hits the account directly on its due date
 - If `Pagamento` is `Carta`, spending is accumulated and charged to the account on day `10` of the following month
+- If a planned direct-account rule already exists for `Carta di credito`, the engine merges that planned amount with the calculated card settlement into one final movement
+
+## Overrides and one-off movements
+
+- Overrides apply to one specific generated occurrence only
+- An override is identified by `rule_id + account_id + original_event_date`
+- An override can change description, date, or amount for that single event
+- Override resolution modes:
+  - `auto`: behaves like a normal planned change
+  - `manual`: stays visible until marked resolved or cancelled
+- One-off movements are not stored as overrides; they are stored separately in `manual_events`
 
 ## Main files
 
@@ -97,6 +112,8 @@ Typical workflow:
 2. Enter or update the real checked balance with date
 3. Save the snapshot
 4. Review the projected movement table for the next months
+5. Add one-off movements if needed
+6. Customize single generated events when a rule needs an exception for one specific occurrence
 
 A snapshot means: on that exact date, the real account balance has been checked manually and should be trusted as the forecast starting point.
 
