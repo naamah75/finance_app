@@ -29,6 +29,8 @@ class ForecastEvent:
     source_rule_id: int | None = None
     source_manual_event_id: int | None = None
     account_id: int | None = None
+    payment_method: str | None = None
+    note: str | None = None
     override_id: int | None = None
     override_status: str | None = None
     override_resolution_mode: str | None = None
@@ -190,6 +192,8 @@ def _apply_override(
         source_rule_id=event.source_rule_id,
         source_manual_event_id=event.source_manual_event_id,
         account_id=event.account_id,
+        payment_method=event.payment_method,
+        note=event.note,
         override_id=int(override["id"]),
         override_status=status,
         override_resolution_mode=resolution_mode,
@@ -258,6 +262,7 @@ def build_account_forecast(
                 event_type="card_spend" if payment_method == "carta" else "direct",
                 source_rule_id=int(rule["id"]),
                 account_id=account_id,
+                payment_method=rule["payment_method"],
             )
             event = _apply_override(base_event, override_map, start_date)
             if event is None or not (start_date <= event.ledger_date <= end_date):
@@ -333,6 +338,8 @@ def build_account_forecast(
                 source_rule_id=None,
                 source_manual_event_id=int(manual_event["id"]),
                 account_id=account_id,
+                payment_method=manual_event["payment_method"],
+                note=manual_event["note"],
             )
         )
 

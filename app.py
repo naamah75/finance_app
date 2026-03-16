@@ -14,8 +14,10 @@ from db import (
     init_db,
     is_rule_expired,
     set_account_overdraft_limit,
+    set_manual_event_status,
     set_setting,
     set_transaction_rule_active,
+    update_manual_event,
     upsert_forecast_event_override,
     upsert_account_snapshot,
 )
@@ -377,20 +379,94 @@ def save_manual_event() -> None:
         )
         return
 
-    add_manual_event(
-        account_id=account["id"],
-        event_date=event_date,
-        description=description,
-        amount=amount,
-        payment_method=manual_event_state["payment_method"] or None,
-        note=manual_event_state["note"].strip() or None,
-    )
+    if manual_event_state["selected_event_id"] is None:
+        add_manual_event(
+            account_id=account["id"],
+            event_date=event_date,
+            description=description,
+            amount=amount,
+            payment_method=manual_event_state["payment_method"] or None,
+            note=manual_event_state["note"].strip() or None,
+        )
+        ui.notify("Movimento manuale aggiunto.", color="positive")
+    else:
+        update_manual_event(
+            event_id=manual_event_state["selected_event_id"],
+            event_date=event_date,
+            description=description,
+            amount=amount,
+            payment_method=manual_event_state["payment_method"] or None,
+            note=manual_event_state["note"].strip() or None,
+        )
+        ui.notify("Movimento manuale aggiornato.", color="positive")
+
+    clear_manual_event_selection(refresh_editor=False)
     manual_event_state["description"] = ""
     manual_event_state["amount"] = ""
     manual_event_state["note"] = ""
-    ui.notify("Movimento manuale aggiunto.", color="positive")
     try_run_default_forecast()
     render_forecast.refresh()
+    render_manual_event_editor.refresh()
+
+
+def clear_manual_event_selection(refresh_editor: bool = True) -> None:
+    manual_event_state["selected_event_id"] = None
+    manual_event_state["selected_key"] = ""
+    manual_event_state["event_date"] = format_ui_date(date.today())
+    manual_event_state["description"] = ""
+    manual_event_state["amount"] = ""
+    manual_event_state["payment_method"] = "Conto"
+    manual_event_state["note"] = ""
+    if refresh_editor:
+        render_manual_event_editor.refresh()
+
+
+def get_selected_forecast_key() -> str:
+    return manual_event_state["selected_key"] or override_state["selected_key"]
+
+
+def select_forecast_row(value: str | None) -> None:
+    selected_key = value or ""
+    selected_row = next(
+        (row for row in override_state["rows"] if row["selection_key"] == selected_key),
+        None,
+    )
+
+    if selected_row is None:
+        clear_manual_event_selection(refresh_editor=False)
+        select_override_event(None, refresh_editor=False)
+    elif selected_row["is_manual_event"]:
+        manual_event_state["selected_event_id"] = selected_row["source_manual_event_id"]
+        manual_event_state["selected_key"] = selected_row["selection_key"]
+        manual_event_state["event_date"] = selected_row["date"]
+        manual_event_state["description"] = selected_row["description"]
+        manual_event_state["amount"] = selected_row["amount"]
+        manual_event_state["payment_method"] = selected_row["payment_method"] or "Conto"
+        manual_event_state["note"] = selected_row["note"] or ""
+        select_override_event(None, refresh_editor=False)
+    else:
+        clear_manual_event_selection(refresh_editor=False)
+        if selected_row["editable"]:
+            select_override_event(selected_row["selection_key"], refresh_editor=False)
+        else:
+            select_override_event(None, refresh_editor=False)
+
+    render_manual_event_editor.refresh()
+    render_override_editor.refresh()
+
+
+def delete_manual_event() -> None:
+    selected_event_id = manual_event_state["selected_event_id"]
+    if selected_event_id is None:
+        ui.notify("Seleziona prima un movimento manuale.", color="negative")
+        return
+
+    set_manual_event_status(selected_event_id, "cancelled")
+    ui.notify("Movimento manuale annullato.", color="positive")
+    clear_manual_event_selection(refresh_editor=False)
+    try_run_default_forecast()
+    render_forecast.refresh()
+    render_manual_event_editor.refresh()
 
 
 def select_override_event(value: str | None, refresh_editor: bool = True) -> None:
@@ -405,6 +481,15 @@ def select_override_event(value: str | None, refresh_editor: bool = True) -> Non
     )
 
     if selected_row is None:
+        override_state["rule_id"] = None
+        override_state["original_event_date"] = ""
+        override_state["override_description"] = ""
+        override_state["override_event_date"] = ""
+        override_state["override_amount"] = ""
+        override_state["resolution_mode"] = "auto"
+        override_state["status"] = "open"
+    elif not selected_row["editable"]:
+        override_state["selected_key"] = ""
         override_state["rule_id"] = None
         override_state["original_event_date"] = ""
         override_state["override_description"] = ""
@@ -524,6 +609,8 @@ settings_state = {
     "warning_margin": str(int(get_warning_margin())),
 }
 manual_event_state = {
+    "selected_event_id": None,
+    "selected_key": "",
     "event_date": format_ui_date(date.today()),
     "description": "",
     "amount": "",
@@ -671,6 +758,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     {
                         "id": index,
                         "selection_key": f"{event.source_rule_id or 'settlement'}|{event.original_event_date.isoformat()}|{index}",
+                        "is_selected": False,
                         "row_bg": month_background(event.event_date.month),
                         "month_break": previous_month_key is not None
                         and month_key != previous_month_key,
@@ -682,6 +770,8 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         "source_manual_event_id": event.source_manual_event_id,
                         "editable": event.source_rule_id is not None,
                         "is_manual_event": event.source_manual_event_id is not None,
+                        "payment_method": getattr(event, "payment_method", None),
+                        "note": getattr(event, "note", None),
                         "original_event_date": event.original_event_date.isoformat(),
                         "original_event_date_label": format_ui_date(
                             event.original_event_date
@@ -755,6 +845,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
             ).classes("w-full rounded-xl overflow-hidden")
             table.style("font-family: 'IBM Plex Mono', monospace; font-size: 11px")
             override_state["rows"] = forecast_rows
+            selected_forecast_key = get_selected_forecast_key()
             available_rows = [row for row in forecast_rows if row["editable"]]
             if override_state["selected_key"] and not any(
                 row["selection_key"] == override_state["selected_key"]
@@ -765,10 +856,13 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 select_override_event(
                     available_rows[0]["selection_key"], refresh_editor=False
                 )
+            selected_forecast_key = get_selected_forecast_key()
+            for row in forecast_rows:
+                row["is_selected"] = row["selection_key"] == selected_forecast_key
             table.add_slot(
                 "body",
                 r"""
-                <q-tr :props="props" @click="() => $parent.$emit('select_override_row', props.row.selection_key)" class="cursor-pointer" :style="'background-color:' + props.row.row_bg + '; border-top:' + (props.row.month_break ? '4px solid #8f7f73' : '0')">
+                <q-tr :props="props" @click="() => $parent.$emit('select_override_row', props.row.selection_key)" class="cursor-pointer" :style="'background-color:' + props.row.row_bg + '; border-top:' + (props.row.month_break ? '4px solid #8f7f73' : '0') + '; box-shadow:' + (props.row.is_selected ? 'inset 0 0 0 2px #2f241f' : 'none')">
                     <q-td key="date" :props="props" style="padding-top: 4px; padding-bottom: 4px">{{ props.row.date }}</q-td>
                     <q-td key="schedule" :props="props" class="text-center">
                         <q-icon v-if="props.row.is_manual_event" name="add_task" color="teal" size="sm">
@@ -807,16 +901,23 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 </q-tr>
                 """,
             )
-            table.on(
-                "select_override_row", lambda event: select_override_event(event.args)
-            )
+            table.on("select_override_row", lambda event: select_forecast_row(event.args))
 
     @ui.refreshable
     def render_manual_event_editor() -> None:
         with ui.card().classes("w-full"):
-            ui.label("Aggiungi movimento una tantum").style(
+            title = (
+                "Modifica movimento una tantum"
+                if manual_event_state["selected_event_id"] is not None
+                else "Aggiungi movimento una tantum"
+            )
+            ui.label(title).style(
                 "font-size: 18px; font-weight: 600"
             )
+            if manual_event_state["selected_event_id"] is not None:
+                ui.label(
+                    "Hai selezionato un movimento manuale dalla tabella: puoi aggiornarlo o annullarlo."
+                ).style("color: #6b5b53; font-size: 13px")
             with ui.row().classes("w-full items-end gap-4"):
                 ui.input(
                     label="Data movimento",
@@ -846,7 +947,17 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         "payment_method", event.value
                     ),
                 ).classes("min-w-[140px]")
-                ui.button(icon="add", on_click=save_manual_event).props("round flat")
+                ui.button(
+                    icon=("save" if manual_event_state["selected_event_id"] is not None else "add"),
+                    on_click=save_manual_event,
+                ).props("round flat")
+                if manual_event_state["selected_event_id"] is not None:
+                    ui.button(icon="close", on_click=clear_manual_event_selection).props(
+                        "round flat"
+                    )
+                    ui.button(icon="delete", on_click=delete_manual_event).props(
+                        "round flat"
+                    )
 
     @ui.refreshable
     def render_override_editor() -> None:

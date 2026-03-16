@@ -461,6 +461,28 @@ def add_manual_event(
     conn.close()
 
 
+def update_manual_event(
+    event_id: int,
+    event_date: str,
+    description: str,
+    amount: float,
+    payment_method: str | None = None,
+    note: str | None = None,
+) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE manual_events
+        SET event_date = ?, description = ?, amount = ?, payment_method = ?, note = ?
+        WHERE id = ?
+        """,
+        (event_date, description, amount, payment_method, note, event_id),
+    )
+    conn.commit()
+    conn.close()
+
+
 def set_manual_event_status(event_id: int, status: str) -> None:
     conn = get_connection()
     cur = conn.cursor()
