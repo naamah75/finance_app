@@ -83,6 +83,8 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
+This installs the UI dependency (`nicegui`) and the Excel import dependency (`openpyxl`).
+
 Start the app:
 
 ```powershell
