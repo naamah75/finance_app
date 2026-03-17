@@ -499,6 +499,7 @@ def get_transaction_rules(active_only: bool = False) -> list[sqlite3.Row]:
         f"""
         SELECT
             transaction_rules.id,
+            transaction_rules.account_id,
             accounts.name AS account_name,
             transaction_rules.description,
             transaction_rules.amount,
@@ -530,6 +531,63 @@ def set_transaction_rule_active(rule_id: int, active: bool) -> None:
     cur.execute(
         "UPDATE transaction_rules SET active = ? WHERE id = ?",
         (1 if active else 0, rule_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_transaction_rule(
+    rule_id: int,
+    account_id: int,
+    description: str,
+    amount: float,
+    frequency: str,
+    day_of_month: int,
+    month_of_year: int | None,
+    payment_method: str | None,
+    provider: str | None,
+    start_date: str | None,
+    end_date: str | None,
+    installments_total: int | None,
+    active: bool,
+) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE transaction_rules
+        SET
+            account_id = ?,
+            description = ?,
+            amount = ?,
+            frequency = ?,
+            day_of_month = ?,
+            month_of_year = ?,
+            payment_method = ?,
+            provider = ?,
+            start_date = ?,
+            end_date = ?,
+            installments_total = ?,
+            card_settlement_day = ?,
+            active = ?
+        WHERE id = ?
+        """,
+        (
+            account_id,
+            description,
+            amount,
+            frequency,
+            day_of_month,
+            month_of_year,
+            payment_method,
+            provider,
+            start_date,
+            end_date,
+            installments_total,
+            10 if payment_method == "carta" else None,
+            1 if active else 0,
+            rule_id,
+        ),
     )
     conn.commit()
     conn.close()

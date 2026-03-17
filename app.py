@@ -18,6 +18,7 @@ from db import (
     set_setting,
     set_transaction_rule_active,
     update_manual_event,
+    update_transaction_rule,
     upsert_forecast_event_override,
     upsert_account_snapshot,
 )
@@ -98,10 +99,35 @@ def get_forecast_window_months() -> int:
     return max(1, months)
 
 
+def get_helper_tooltips_enabled() -> bool:
+    raw_value = (get_setting("helper_tooltips_enabled", "1") or "1").strip().lower()
+    return raw_value not in {"0", "false", "no", "off"}
+
+
+def add_tooltip(element, text: str):
+    if settings_state["helper_tooltips_enabled"]:
+        element.tooltip(text)
+    return element
+
+
 def format_cadence(rule: dict) -> str:
     if rule["frequency"] == "yearly" and rule["month_of_year"]:
         return f"{rule['day_of_month']}/{rule['month_of_year']}"
     return f"giorno {rule['day_of_month']}"
+
+
+def format_rule_frequency(rule: dict) -> str:
+    return "Annuale" if rule["frequency"] == "yearly" else "Mensile"
+
+
+def format_rule_validity(start_date: str | None, end_date: str | None) -> str:
+    if start_date and end_date:
+        return f"da {format_ui_date(start_date)} a {format_ui_date(end_date)}"
+    if start_date:
+        return f"da {format_ui_date(start_date)}"
+    if end_date:
+        return f"fino al {format_ui_date(end_date)}"
+    return "sempre attiva"
 
 
 def get_rule_status(rule: dict) -> tuple[str, str]:
@@ -112,11 +138,183 @@ def get_rule_status(rule: dict) -> tuple[str, str]:
     return "Disattivata", "#8a1c1c"
 
 
-def load_rules(account_filter: str) -> list[dict]:
+def get_rule_card_style(is_selected: bool, status_color: str) -> str:
+    base = (
+        f"border-left: 7px solid {status_color}; border-top: 1px solid rgba(47, 36, 31, 0.08); "
+        f"border-right: 1px solid rgba(47, 36, 31, 0.08); border-bottom: 1px solid rgba(47, 36, 31, 0.08); "
+    )
+    if is_selected:
+        return (
+            base
+            + "background-color: #f3e7d4 !important; box-shadow: 0 8px 20px rgba(143, 106, 70, 0.14);"
+        )
+    return base + "background-color: #ffffff !important;"
+
+
+def load_rules(account_filter: str, show_expired: bool = False) -> list[dict]:
     rules = [dict(row) for row in get_transaction_rules()]
-    if account_filter == "Tutti":
-        return rules
-    return [rule for rule in rules if rule["account_name"] == account_filter]
+    if account_filter != "Tutti":
+        rules = [rule for rule in rules if rule["account_name"] == account_filter]
+    if not show_expired:
+        rules = [rule for rule in rules if not is_rule_expired(rule["end_date"])]
+    return rules
+
+
+def clear_rule_selection(refresh_editor: bool = True) -> None:
+    rule_state["selected_rule_id"] = None
+    rule_state["account_name"] = dashboard_state["account_name"]
+    rule_state["description"] = ""
+    rule_state["amount"] = ""
+    rule_state["frequency"] = "monthly"
+    rule_state["day_of_month"] = ""
+    rule_state["month_of_year"] = ""
+    rule_state["payment_method"] = "Conto"
+    rule_state["provider"] = ""
+    rule_state["start_date"] = ""
+    rule_state["end_date"] = ""
+    rule_state["installments_total"] = ""
+    rule_state["active"] = True
+    rule_state["source_sheet"] = ""
+    refresh_all_rule_views()
+    if refresh_editor:
+        refresh_rule_editor()
+
+
+def select_rule(rule_id: int | None, refresh_editor: bool = True) -> None:
+    if rule_id is None:
+        clear_rule_selection(refresh_editor=refresh_editor)
+        return
+    if rule_state["selected_rule_id"] == int(rule_id):
+        clear_rule_selection(refresh_editor=refresh_editor)
+        return
+
+    selected_rule = next(
+        (dict(row) for row in get_transaction_rules() if int(row["id"]) == int(rule_id)),
+        None,
+    )
+    if selected_rule is None:
+        clear_rule_selection(refresh_editor=refresh_editor)
+        return
+
+    rule_state["selected_rule_id"] = int(selected_rule["id"])
+    rule_state["account_name"] = selected_rule["account_name"]
+    rule_state["description"] = selected_rule["description"]
+    rule_state["amount"] = f"{float(selected_rule['amount']):.2f}"
+    rule_state["frequency"] = selected_rule["frequency"]
+    rule_state["day_of_month"] = str(selected_rule["day_of_month"] or "")
+    rule_state["month_of_year"] = str(selected_rule["month_of_year"] or "")
+    rule_state["payment_method"] = (selected_rule["payment_method"] or "Conto").capitalize()
+    rule_state["provider"] = selected_rule["provider"] or ""
+    rule_state["start_date"] = (
+        format_ui_date(selected_rule["start_date"]) if selected_rule["start_date"] else ""
+    )
+    rule_state["end_date"] = (
+        format_ui_date(selected_rule["end_date"]) if selected_rule["end_date"] else ""
+    )
+    rule_state["installments_total"] = str(selected_rule["installments_total"] or "")
+    rule_state["active"] = bool(selected_rule["active"])
+    rule_state["source_sheet"] = selected_rule["source_sheet"] or ""
+    refresh_all_rule_views()
+    if refresh_editor:
+        refresh_rule_editor()
+
+
+def save_rule_changes() -> None:
+    rule_id = rule_state["selected_rule_id"]
+    if rule_id is None:
+        ui.notify("Seleziona prima una regola da modificare.", color="negative")
+        return
+    rule_id = int(str(rule_id))
+
+    account_name = str(rule_state["account_name"])
+    description = str(rule_state["description"]).strip()
+    amount_text = str(rule_state["amount"]).strip()
+    frequency = str(rule_state["frequency"])
+    day_of_month_text = str(rule_state["day_of_month"]).strip()
+    month_of_year_text = str(rule_state["month_of_year"]).strip()
+    start_date_text = str(rule_state["start_date"]).strip()
+    end_date_text = str(rule_state["end_date"]).strip()
+    installments_total_text = str(rule_state["installments_total"]).strip()
+    provider_text = str(rule_state["provider"]).strip()
+    payment_method_text = str(rule_state["payment_method"] or "").strip().lower()
+    active = bool(rule_state["active"])
+
+    account = get_account_by_name(account_name)
+    if account is None:
+        ui.notify("Conto non trovato per la regola selezionata.", color="negative")
+        return
+
+    if not description:
+        ui.notify("Inserisci una descrizione per la regola.", color="negative")
+        return
+
+    try:
+        amount = float(amount_text.replace(",", "."))
+        day_of_month = int(day_of_month_text)
+        month_of_year = (
+            int(month_of_year_text)
+            if frequency == "yearly" and month_of_year_text
+            else None
+        )
+        start_date = (
+            parse_ui_date(start_date_text).isoformat()
+            if start_date_text
+            else None
+        )
+        end_date = (
+            parse_ui_date(end_date_text).isoformat()
+            if end_date_text
+            else None
+        )
+        installments_total = (
+            int(installments_total_text)
+            if installments_total_text
+            else None
+        )
+    except ValueError:
+        ui.notify("Controlla i campi numerici e le date della regola.", color="negative")
+        return
+
+    if not 1 <= day_of_month <= 31:
+        ui.notify("Il giorno della regola deve essere tra 1 e 31.", color="negative")
+        return
+    if frequency == "yearly" and month_of_year is None:
+        ui.notify("Per una regola annuale serve anche il mese.", color="negative")
+        return
+    if month_of_year is not None and not 1 <= month_of_year <= 12:
+        ui.notify("Il mese della regola deve essere tra 1 e 12.", color="negative")
+        return
+    if installments_total is not None and installments_total < 1:
+        ui.notify("Il numero rate deve essere almeno 1.", color="negative")
+        return
+    if start_date and end_date and end_date < start_date:
+        ui.notify("La data fine non puo essere precedente alla data inizio.", color="negative")
+        return
+
+    payment_method = payment_method_text or None
+
+    update_transaction_rule(
+        rule_id=rule_id,
+        account_id=int(account["id"]),
+        description=description,
+        amount=amount,
+        frequency=frequency,
+        day_of_month=day_of_month,
+        month_of_year=month_of_year,
+        payment_method=payment_method,
+        provider=provider_text or None,
+        start_date=start_date,
+        end_date=end_date,
+        installments_total=installments_total,
+        active=active,
+    )
+    ui.notify("Regola aggiornata.", color="positive")
+    try_run_default_forecast()
+    render_forecast.refresh()
+    render_override_editor.refresh()
+    refresh_all_rule_views()
+    select_rule(rule_id, refresh_editor=False)
+    refresh_rule_editor()
 
 
 def get_dashboard_status(min_balance: float, overdraft_limit: float) -> tuple[str, str]:
@@ -157,8 +355,14 @@ def select_active_account(account_name: str) -> None:
 
 
 def refresh_all_rule_views() -> None:
-    render_rule_stats.refresh(rule_state["account_filter"])
-    render_rules.refresh(rule_state["account_filter"])
+    render_rule_stats.refresh(str(rule_state["account_filter"]))
+    render_rules.refresh(str(rule_state["account_filter"]))
+
+
+def refresh_rule_editor() -> None:
+    editor = globals().get("render_rule_editor")
+    if editor is not None:
+        editor.refresh()
 
 
 def refresh_snapshot_views() -> None:
@@ -225,6 +429,12 @@ def try_run_default_forecast() -> None:
 
 def toggle_rule(rule_id: int, active: bool) -> None:
     set_transaction_rule_active(rule_id, active)
+    if rule_state["selected_rule_id"] == rule_id:
+        rule_state["active"] = active
+        refresh_rule_editor()
+    try_run_default_forecast()
+    render_forecast.refresh()
+    render_override_editor.refresh()
     refresh_all_rule_views()
 
 
@@ -320,6 +530,21 @@ def save_warning_margin(value_text: str) -> None:
     render_forecast.refresh()
     render_override_editor.refresh()
     ui.notify("Soglia attenzione aggiornata.", color="positive")
+
+
+def save_helper_tooltips_enabled(enabled: bool) -> None:
+    set_setting("helper_tooltips_enabled", "1" if enabled else "0")
+    settings_state["helper_tooltips_enabled"] = enabled
+    render_dashboard_header.refresh()
+    render_forecast.refresh()
+    render_manual_event_editor.refresh()
+    render_override_editor.refresh()
+    refresh_all_rule_views()
+    render_settings.refresh()
+    ui.notify(
+        "Tooltip guida attivati." if enabled else "Tooltip guida disattivati.",
+        color="positive",
+    )
 
 
 def run_forecast() -> None:
@@ -586,7 +811,24 @@ def clear_event_override() -> None:
 
 init_db()
 
-rule_state = {"account_filter": "Tutti"}
+rule_state: dict[str, object] = {
+    "account_filter": "Fineco",
+    "show_expired": False,
+    "selected_rule_id": None,
+    "account_name": "Fineco",
+    "description": "",
+    "amount": "",
+    "frequency": "monthly",
+    "day_of_month": "",
+    "month_of_year": "",
+    "payment_method": "Conto",
+    "provider": "",
+    "start_date": "",
+    "end_date": "",
+    "installments_total": "",
+    "active": True,
+    "source_sheet": "",
+}
 snapshot_state = {
     "account_name": "Fineco",
     "snapshot_date": format_ui_date(date.today()),
@@ -607,6 +849,7 @@ dashboard_state = {
 settings_state = {
     "forecast_window_months": str(get_forecast_window_months()),
     "warning_margin": str(int(get_warning_margin())),
+    "helper_tooltips_enabled": get_helper_tooltips_enabled(),
 }
 manual_event_state = {
     "selected_event_id": None,
@@ -632,6 +875,7 @@ override_state = {
 if get_account_by_name("Fineco") is None and get_accounts():
     default_name = get_accounts()[0]["name"]
     dashboard_state["account_name"] = default_name
+    rule_state["account_filter"] = default_name
 
 sync_snapshot_form(dashboard_state["account_name"])
 forecast_state["account_name"] = dashboard_state["account_name"]
@@ -643,6 +887,28 @@ ui.add_head_html(
     '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
     '<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">'
 )
+ui.add_head_html(
+    """
+    <style>
+    .forecast-table .q-table__middle {
+        max-height: 990px;
+    }
+    .forecast-table thead tr th {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        background: #f6f1e8;
+    }
+    .forecast-table .q-table__bottom {
+        position: sticky;
+        bottom: 0;
+        z-index: 2;
+        background: #fffdf8;
+        border-top: 1px solid rgba(47, 36, 31, 0.08);
+    }
+    </style>
+    """
+)
 
 with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
     with ui.tabs().classes("w-full") as tabs:
@@ -652,35 +918,58 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
 
     @ui.refreshable
     def render_rule_stats(account_filter: str) -> None:
-        rules = load_rules(account_filter)
+        rules = load_rules(account_filter, show_expired=bool(rule_state["show_expired"]))
+        all_rules = load_rules(account_filter, show_expired=True)
         active_rules = [
             rule
-            for rule in rules
+            for rule in all_rules
             if rule["active"] and not is_rule_expired(rule["end_date"])
         ]
-        expired_rules = [rule for rule in rules if is_rule_expired(rule["end_date"])]
+        expired_rules = [rule for rule in all_rules if is_rule_expired(rule["end_date"])]
         disabled_rules = [
             rule
-            for rule in rules
+            for rule in all_rules
             if not rule["active"] and not is_rule_expired(rule["end_date"])
         ]
 
-        with ui.row().classes("w-full gap-4"):
-            for title, value in (
-                ("Regole visibili", len(rules)),
-                ("Attive effettive", len(active_rules)),
-                ("Disattivate manualmente", len(disabled_rules)),
-                ("Scadute", len(expired_rules)),
-            ):
-                with ui.card().classes("min-w-[180px] flex-1"):
-                    ui.label(title).style("color: #6b5b53; font-size: 14px")
-                    ui.label(str(value)).style(
-                        "font-size: 28px; font-weight: 700; color: #2f241f"
+        with ui.card().classes("w-full"):
+            with ui.column().classes("w-full gap-0"):
+                with ui.row().classes("w-full items-center justify-between gap-4"):
+                    ui.label("Riepilogo regole").style(
+                        "color: #6b5b53; font-size: 12px; line-height: 1; text-transform: uppercase; letter-spacing: 0.08em"
                     )
+                with ui.row().classes("w-full items-center justify-between gap-4 no-wrap"):
+                    for title, value in (
+                        ("Visibili", len(rules)),
+                        ("Attive effettive", len(active_rules)),
+                        ("Disattivate manualmente", len(disabled_rules)),
+                        ("Scadute", len(expired_rules)),
+                    ):
+                        with ui.row().classes("items-baseline gap-2"):
+                            ui.label(f"{title}:").style(
+                                "color: #5f5048; font-size: 13px; line-height: 1"
+                            )
+                            ui.label(str(value)).style(
+                                "font-size: 15px; line-height: 1; font-weight: 700; color: #2f241f"
+                            )
+                    with ui.row().classes("items-center gap-2"):
+                        ui.label("Mostra scadute:").style(
+                            "color: #5f5048; font-size: 13px; line-height: 1"
+                        )
+                        add_tooltip(
+                            ui.switch(
+                                value=bool(rule_state["show_expired"]),
+                                on_change=lambda event: (
+                                    rule_state.__setitem__("show_expired", bool(event.value)),
+                                    refresh_all_rule_views(),
+                                ),
+                            ),
+                            "Mostra anche le regole scadute, cosi puoi modificarle o estenderne la validita.",
+                        )
 
     @ui.refreshable
     def render_rules(account_filter: str) -> None:
-        rules = load_rules(account_filter)
+        rules = load_rules(account_filter, show_expired=bool(rule_state["show_expired"]))
 
         with ui.column().classes("w-full gap-3"):
             if not rules:
@@ -691,37 +980,215 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
             for rule in rules:
                 status_text, status_color = get_rule_status(rule)
                 payment_method = (rule["payment_method"] or "n/d").capitalize()
-                provider = rule["provider"] or "-"
-                date_range = rule["start_date"] or "-"
-                if rule["end_date"]:
-                    date_range = f"{date_range} -> {rule['end_date']}"
+                supplier = rule["provider"] or "-"
+                date_range = format_rule_validity(rule["start_date"], rule["end_date"])
+                is_selected = rule_state["selected_rule_id"] == int(rule["id"])
 
-                with ui.card().classes("w-full"):
+                card = ui.card().classes("w-full cursor-pointer transition-all")
+                card.style(get_rule_card_style(is_selected, status_color))
+                card.on("click", lambda _, rule_id=rule["id"]: select_rule(int(rule_id)))
+                with card:
                     with ui.row().classes(
-                        "w-full items-center justify-between gap-4 no-wrap"
+                        "w-full items-center justify-between gap-3 no-wrap"
                     ):
-                        with ui.column().classes("gap-1"):
+                        with ui.column().classes("gap-0"):
                             ui.label(rule["description"]).style(
-                                "font-size: 18px; font-weight: 600"
+                                f"font-size: 16px; font-weight: 600; color: {'#2f241f' if is_selected else '#3f342e'}"
                             )
                             ui.label(
-                                f"{rule['account_name']} | {rule['amount']:.2f} EUR | {rule['frequency']} | {format_cadence(rule)}"
-                            ).style("color: #5f5048")
+                                f"{rule['account_name']} | {rule['amount']:.2f} EUR | {format_rule_frequency(rule)} | {format_cadence(rule)}"
+                            ).style("color: #6c5d55; font-size: 13px; line-height: 1.15")
                             ui.label(
-                                f"Pagamento: {payment_method} | Provider: {provider} | Validita: {date_range}"
-                            ).style("color: #7a6a62; font-size: 13px")
+                                f"Pagamento: {payment_method} | Fornitore: {supplier} | Validita: {date_range}"
+                            ).style("color: #7f726a; font-size: 12px; line-height: 1.15")
 
-                        with ui.column().classes("items-end gap-1"):
-                            ui.label(status_text).style(
-                                f"color: {status_color}; font-weight: 700; font-size: 14px"
+                        with ui.column().classes("items-end gap-0"):
+                            add_tooltip(
+                                ui.icon("lens").style(
+                                    f"color: {status_color}; font-size: 18px"
+                                ),
+                                status_text,
                             )
-                            ui.switch(
-                                text="Abilitata manualmente",
+                            add_tooltip(
+                                ui.button(
+                                    icon="edit",
+                                    on_click=lambda _, rule_id=rule["id"]: select_rule(
+                                        int(rule_id)
+                                    ),
+                                ).props("round flat"),
+                                "Carica questa regola nel pannello di modifica.",
+                            )
+                            add_tooltip(
+                                ui.switch(
+                                text="Abilitata",
                                 value=bool(rule["active"]),
                                 on_change=lambda event, rule_id=rule["id"]: toggle_rule(
                                     rule_id, bool(event.value)
                                 ),
+                                ),
+                                "Attiva o disattiva manualmente questa regola senza cancellarla.",
                             )
+
+    @ui.refreshable
+    def render_rule_editor() -> None:
+        account_options = [account["name"] for account in get_accounts()]
+        selected_rule_id = rule_state["selected_rule_id"]
+        account_name = str(rule_state["account_name"])
+        description = str(rule_state["description"])
+        amount = str(rule_state["amount"])
+        frequency = str(rule_state["frequency"])
+        day_of_month = str(rule_state["day_of_month"])
+        month_of_year = str(rule_state["month_of_year"])
+        payment_method = str(rule_state["payment_method"])
+        supplier = str(rule_state["provider"])
+        start_date = str(rule_state["start_date"])
+        end_date = str(rule_state["end_date"])
+        installments_total = str(rule_state["installments_total"])
+        active = bool(rule_state["active"])
+
+        with ui.card().classes("w-full"):
+            ui.label("Modifica regola").style("font-size: 22px; font-weight: 600")
+            if selected_rule_id is None:
+                return
+
+            with ui.column().classes("w-full gap-1"):
+                add_tooltip(
+                    ui.select(
+                        options=account_options,
+                        value=account_name,
+                        label="Conto",
+                        on_change=lambda event: rule_state.__setitem__(
+                            "account_name", event.value
+                        ),
+                    ),
+                    "Conto su cui la regola impatta la previsione.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.input(
+                        label="Descrizione",
+                        value=description,
+                        on_change=lambda event: rule_state.__setitem__(
+                            "description", event.value
+                        ),
+                    ),
+                    "Descrizione mostrata nei movimenti generati dalla regola.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.input(
+                        label="Importo",
+                        value=amount,
+                        on_change=lambda event: rule_state.__setitem__(
+                            "amount", event.value
+                        ),
+                    ),
+                    "Importo della regola: negativo per uscite, positivo per entrate.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.select(
+                        options={"monthly": "Mensile", "yearly": "Annuale"},
+                        value=frequency,
+                        label="Frequenza",
+                        on_change=lambda event: rule_state.__setitem__(
+                            "frequency", event.value
+                        ),
+                    ),
+                    "Scegli se la regola si ripete ogni mese o una volta l'anno.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.input(
+                        label="Giorno",
+                        value=day_of_month,
+                        on_change=lambda event: rule_state.__setitem__(
+                            "day_of_month", event.value
+                        ),
+                    ),
+                    "Giorno del mese in cui la regola genera il movimento.",
+                ).classes("w-full")
+                if frequency == "yearly":
+                    add_tooltip(
+                        ui.input(
+                            label="Mese",
+                            value=month_of_year,
+                            on_change=lambda event: rule_state.__setitem__(
+                                "month_of_year", event.value
+                            ),
+                        ),
+                        "Mese dell'anno per le regole annuali.",
+                    ).classes("w-full")
+                add_tooltip(
+                    ui.select(
+                        options=["Conto", "Carta"],
+                        value=payment_method,
+                        label="Pagamento",
+                        on_change=lambda event: rule_state.__setitem__(
+                            "payment_method", event.value
+                        ),
+                    ),
+                    "Conto applica il movimento subito; Carta lo porta al saldo carta del mese successivo.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.input(
+                        label="Fornitore",
+                        value=supplier,
+                        on_change=lambda event: rule_state.__setitem__(
+                            "provider", event.value
+                        ),
+                    ),
+                    "Campo facoltativo per banca, finanziaria o altro fornitore collegato alla regola.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.input(
+                        label="Data inizio",
+                        value=start_date,
+                        on_change=lambda event: rule_state.__setitem__(
+                            "start_date", event.value
+                        ),
+                    ),
+                    "Data da cui la regola inizia a produrre movimenti, formato DD-MM-YYYY.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.input(
+                        label="Data fine",
+                        value=end_date,
+                        on_change=lambda event: rule_state.__setitem__(
+                            "end_date", event.value
+                        ),
+                    ),
+                    "Data oltre la quale la regola e considerata scaduta; svuota il campo per riattivarla nel tempo.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.input(
+                        label="Numero rate",
+                        value=installments_total,
+                        on_change=lambda event: rule_state.__setitem__(
+                            "installments_total", event.value
+                        ),
+                    ),
+                    "Numero totale rate, se la regola rappresenta un pagamento rateale.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.switch(
+                        text="Abilitata manualmente",
+                        value=active,
+                        on_change=lambda event: rule_state.__setitem__(
+                            "active", bool(event.value)
+                        ),
+                    ),
+                    "Mantiene la regola attiva o disattiva senza cancellarla.",
+                )
+                with ui.row().classes("w-full justify-end gap-2 pt-0"):
+                    add_tooltip(
+                        ui.button(icon="close", on_click=clear_rule_selection).props(
+                            "round flat"
+                        ),
+                        "Deseleziona la regola e svuota il pannello di modifica.",
+                    )
+                    add_tooltip(
+                        ui.button(icon="save", on_click=save_rule_changes).props(
+                            "round flat"
+                        ),
+                        "Salva i cambiamenti fatti alla regola selezionata.",
+                    )
 
     @ui.refreshable
     def render_forecast() -> None:
@@ -842,7 +1309,8 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 rows=forecast_rows,
                 row_key="id",
                 pagination=34,
-            ).classes("w-full rounded-xl overflow-hidden")
+            ).classes("w-full rounded-xl overflow-hidden forecast-table")
+            table.props('table-style="max-height: 990px"')
             table.style("font-family: 'IBM Plex Mono', monospace; font-size: 11px")
             override_state["rows"] = forecast_rows
             selected_forecast_key = get_selected_forecast_key()
@@ -863,7 +1331,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 "body",
                 r"""
                 <q-tr :props="props" @click="() => $parent.$emit('select_override_row', props.row.selection_key)" class="cursor-pointer" :style="'background-color:' + props.row.row_bg + '; border-top:' + (props.row.month_break ? '4px solid #8f7f73' : '0') + '; box-shadow:' + (props.row.is_selected ? 'inset 0 0 0 2px #2f241f' : 'none')">
-                    <q-td key="date" :props="props" style="padding-top: 4px; padding-bottom: 4px">{{ props.row.date }}</q-td>
+                    <q-td key="date" :props="props" style="padding-top: 2px; padding-bottom: 2px">{{ props.row.date }}</q-td>
                     <q-td key="schedule" :props="props" class="text-center">
                         <q-icon v-if="props.row.is_manual_event" name="add_task" color="teal" size="sm">
                             <q-tooltip>Movimento manuale una tantum</q-tooltip>
@@ -887,14 +1355,14 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     <q-td key="type" :props="props" class="text-center">
                         <q-icon :name="props.row.type" :color="props.row.amount_value < 0 ? 'negative' : 'positive'" size="sm" />
                     </q-td>
-                    <q-td key="description" :props="props" style="padding-top: 4px; padding-bottom: 4px">
+                    <q-td key="description" :props="props" style="padding-top: 2px; padding-bottom: 2px">
                         <div class="row items-center no-wrap">
                             <q-icon v-if="props.row.carried_overdue" name="history" color="warning" size="xs" class="q-mr-xs" />
                             <span>{{ props.row.description }}</span>
                         </div>
                     </q-td>
-                    <q-td key="amount" :props="props" style="padding-top: 4px; padding-bottom: 4px" :class="props.row.amount_value < 0 ? 'text-[#8a1c1c]' : 'text-[#1f7a1f]'">{{ props.row.amount }}</q-td>
-                    <q-td key="balance" :props="props" style="padding-top: 4px; padding-bottom: 4px" :class="props.row.balance_value < 0 ? 'text-[#8a1c1c] font-semibold' : 'text-[#2f241f] font-semibold'">{{ props.row.balance }}</q-td>
+                    <q-td key="amount" :props="props" style="padding-top: 2px; padding-bottom: 2px" :class="props.row.amount_value < 0 ? 'text-[#8a1c1c]' : 'text-[#1f7a1f]'">{{ props.row.amount }}</q-td>
+                    <q-td key="balance" :props="props" style="padding-top: 2px; padding-bottom: 2px" :class="props.row.balance_value < 0 ? 'text-[#8a1c1c] font-semibold' : 'text-[#2f241f] font-semibold'">{{ props.row.balance }}</q-td>
                     <q-td key="status" :props="props" class="text-center">
                         <q-icon :name="props.row.status" :color="props.row.status === 'dangerous' ? 'negative' : (props.row.status === 'warning' ? 'warning' : 'positive')" size="sm" />
                     </q-td>
@@ -918,46 +1386,64 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 ui.label(
                     "Hai selezionato un movimento manuale dalla tabella: puoi aggiornarlo o annullarlo."
                 ).style("color: #6b5b53; font-size: 13px")
-            with ui.row().classes("w-full items-end gap-4"):
-                ui.input(
-                    label="Data movimento",
-                    value=manual_event_state["event_date"],
-                    on_change=lambda event: manual_event_state.__setitem__(
-                        "event_date", event.value
+            with ui.column().classes("w-full gap-1"):
+                add_tooltip(
+                    ui.input(
+                        label="Data movimento",
+                        value=manual_event_state["event_date"],
+                        on_change=lambda event: manual_event_state.__setitem__(
+                            "event_date", event.value
+                        ),
                     ),
-                ).classes("min-w-[170px]")
-                ui.input(
-                    label="Descrizione una tantum",
-                    value=manual_event_state["description"],
-                    on_change=lambda event: manual_event_state.__setitem__(
-                        "description", event.value
+                    "Data del movimento una tantum, nel formato DD-MM-YYYY.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.input(
+                        label="Descrizione una tantum",
+                        value=manual_event_state["description"],
+                        on_change=lambda event: manual_event_state.__setitem__(
+                            "description", event.value
+                        ),
                     ),
-                ).classes("min-w-[260px]")
-                ui.input(
-                    label="Importo",
-                    value=manual_event_state["amount"],
-                    on_change=lambda event: manual_event_state.__setitem__(
-                        "amount", event.value
+                    "Nome breve del movimento manuale che vuoi aggiungere o modificare.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.input(
+                        label="Importo",
+                        value=manual_event_state["amount"],
+                        on_change=lambda event: manual_event_state.__setitem__(
+                            "amount", event.value
+                        ),
                     ),
-                ).classes("min-w-[140px]")
-                ui.select(
-                    options=["Conto", "Carta"],
-                    value=manual_event_state["payment_method"],
-                    on_change=lambda event: manual_event_state.__setitem__(
-                        "payment_method", event.value
+                    "Importo del movimento: usa un valore negativo per un'uscita e positivo per un'entrata.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.select(
+                        options=["Conto", "Carta"],
+                        value=manual_event_state["payment_method"],
+                        on_change=lambda event: manual_event_state.__setitem__(
+                            "payment_method", event.value
+                        ),
                     ),
-                ).classes("min-w-[140px]")
-                ui.button(
-                    icon=("save" if manual_event_state["selected_event_id"] is not None else "add"),
-                    on_click=save_manual_event,
-                ).props("round flat")
-                if manual_event_state["selected_event_id"] is not None:
-                    ui.button(icon="close", on_click=clear_manual_event_selection).props(
-                        "round flat"
-                    )
-                    ui.button(icon="delete", on_click=delete_manual_event).props(
-                        "round flat"
-                    )
+                    "Indica se il movimento impatta il conto direttamente o passa dalla carta.",
+                ).classes("w-full")
+                with ui.row().classes("w-full justify-end gap-2 pt-0"):
+                    if manual_event_state["selected_event_id"] is not None:
+                        add_tooltip(
+                            ui.button(icon="close", on_click=clear_manual_event_selection),
+                            "Esci dalla modifica e svuota il form senza cancellare il movimento.",
+                        ).props("round flat")
+                        add_tooltip(
+                            ui.button(icon="delete", on_click=delete_manual_event),
+                            "Annulla il movimento manuale selezionato e toglilo dalla previsione.",
+                        ).props("round flat")
+                    add_tooltip(
+                        ui.button(
+                            icon=("save" if manual_event_state["selected_event_id"] is not None else "add"),
+                            on_click=save_manual_event,
+                        ),
+                        "Salva questo movimento manuale oppure aggiorna quello selezionato.",
+                    ).props("round flat")
 
     @ui.refreshable
     def render_override_editor() -> None:
@@ -979,107 +1465,144 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 ]: f"{row['date']} | {row['description']} | {row['amount']}"
                 for row in editable_rows
             }
-            ui.select(
-                options=event_options,
-                value=override_state["selected_key"] or next(iter(event_options)),
-                label="Movimento da modificare",
-                on_change=lambda event: select_override_event(event.value),
+            add_tooltip(
+                ui.select(
+                    options=event_options,
+                    value=override_state["selected_key"] or next(iter(event_options)),
+                    label="Movimento da modificare",
+                    on_change=lambda event: select_override_event(event.value),
+                ),
+                "Seleziona un movimento generato da regola per personalizzarne data, importo o descrizione.",
             ).classes("w-full")
 
-            ui.label(
-                "Auto: l'override segue la normale pianificazione. Manuale: resta pendente finche non lo segni come risolto o annullato."
-            ).style("color: #6b5b53; font-size: 13px")
-
-            with ui.row().classes("w-full items-end gap-4 mt-3"):
-                ui.input(
-                    label="Nuova descrizione",
-                    value=override_state["override_description"],
-                    on_change=lambda event: override_state.__setitem__(
-                        "override_description", event.value
+            with ui.column().classes("w-full gap-0 mt-1"):
+                add_tooltip(
+                    ui.input(
+                        label="Nuova descrizione",
+                        value=override_state["override_description"],
+                        on_change=lambda event: override_state.__setitem__(
+                            "override_description", event.value
+                        ),
                     ),
-                ).classes("min-w-[260px]")
-                ui.input(
-                    label="Nuova data",
-                    value=override_state["override_event_date"],
-                    on_change=lambda event: override_state.__setitem__(
-                        "override_event_date", event.value
+                    "Descrizione sostitutiva per questa singola occorrenza della regola.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.input(
+                        label="Nuova data",
+                        value=override_state["override_event_date"],
+                        on_change=lambda event: override_state.__setitem__(
+                            "override_event_date", event.value
+                        ),
                     ),
-                ).classes("min-w-[170px]")
-                ui.input(
-                    label="Nuovo importo",
-                    value=override_state["override_amount"],
-                    on_change=lambda event: override_state.__setitem__(
-                        "override_amount", event.value
+                    "Nuova data pianificata per questo solo movimento, nel formato DD-MM-YYYY.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.input(
+                        label="Nuovo importo",
+                        value=override_state["override_amount"],
+                        on_change=lambda event: override_state.__setitem__(
+                            "override_amount", event.value
+                        ),
                     ),
-                ).classes("min-w-[150px]")
-                ui.select(
-                    options={"auto": "Auto", "manual": "Manuale"},
-                    value=override_state["resolution_mode"],
-                    label="Risoluzione",
-                    on_change=lambda event: override_state.__setitem__(
-                        "resolution_mode", event.value
+                    "Nuovo importo per questa singola occorrenza della regola.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.select(
+                        options={"auto": "Auto", "manual": "Manuale"},
+                        value=override_state["resolution_mode"],
+                        label="Risoluzione",
+                        on_change=lambda event: override_state.__setitem__(
+                            "resolution_mode", event.value
+                        ),
                     ),
-                ).classes("min-w-[150px]")
-                ui.select(
-                    options={
-                        "open": "Aperto",
-                        "resolved": "Risolto",
-                        "cancelled": "Annullato",
-                    },
-                    value=override_state["status"],
-                    label="Stato",
-                    on_change=lambda event: override_state.__setitem__(
-                        "status", event.value
+                    "Auto segue la pianificazione; Manuale lascia il movimento pendente finche non lo chiudi.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.select(
+                        options={
+                            "open": "Aperto",
+                            "resolved": "Risolto",
+                            "cancelled": "Annullato",
+                        },
+                        value=override_state["status"],
+                        label="Stato",
+                        on_change=lambda event: override_state.__setitem__(
+                            "status", event.value
+                        ),
                     ),
-                ).classes("min-w-[150px]")
-                ui.button(icon="save", on_click=save_event_override).props("round flat")
-                ui.button(icon="delete", on_click=clear_event_override).props(
-                    "round flat"
-                )
+                    "Stato operativo dell'override selezionato.",
+                ).classes("w-full")
+                with ui.row().classes("w-full justify-end gap-2 pt-0"):
+                    add_tooltip(
+                        ui.button(icon="delete", on_click=clear_event_override),
+                        "Rimuove l'override e ripristina il movimento originale della regola.",
+                    ).props("round flat")
+                    add_tooltip(
+                        ui.button(icon="save", on_click=save_event_override),
+                        "Salva la personalizzazione del movimento selezionato.",
+                    ).props("round flat")
 
     @ui.refreshable
     def render_dashboard_header() -> None:
         with ui.card().classes("w-full"):
             with ui.column().classes("w-full gap-3"):
                 with ui.row().classes("items-center gap-3"):
-                    ui.select(
+                    add_tooltip(
+                        ui.select(
                         options=[account_row["name"] for account_row in get_accounts()],
                         value=dashboard_state["account_name"],
                         on_change=lambda event: select_active_account(event.value),
+                        ),
+                        "Scegli il conto su cui lavorare nella vista Movimenti.",
                     ).classes("min-w-[240px]").style(
                         "font-family: 'IBM Plex Mono', monospace; font-size: 28px; text-transform: uppercase; letter-spacing: 0.08em"
                     )
-                    ui.button(
-                        icon="refresh",
-                        on_click=lambda: (
-                            try_run_default_forecast(),
-                            render_forecast.refresh(),
+                    add_tooltip(
+                        ui.button(
+                            icon="refresh",
+                            on_click=lambda: (
+                                try_run_default_forecast(),
+                                render_forecast.refresh(),
+                            ),
                         ),
+                        "Ricalcola la previsione usando i dati correnti del conto selezionato.",
                     ).props("round flat")
 
             with ui.row().classes("w-full items-end gap-4"):
-                ui.input(
-                    label="Data aggiornamento",
-                    value=snapshot_state["snapshot_date"],
-                    on_change=lambda event: snapshot_state.__setitem__(
-                        "snapshot_date", event.value
+                add_tooltip(
+                    ui.input(
+                        label="Data aggiornamento",
+                        value=snapshot_state["snapshot_date"],
+                        on_change=lambda event: snapshot_state.__setitem__(
+                            "snapshot_date", event.value
+                        ),
                     ),
+                    "Data del saldo reale verificato, nel formato DD-MM-YYYY.",
                 ).classes("min-w-[180px]")
-                ui.input(
-                    label="Saldo",
-                    value=snapshot_state["balance"],
-                    on_change=lambda event: snapshot_state.__setitem__(
-                        "balance", event.value
+                add_tooltip(
+                    ui.input(
+                        label="Saldo",
+                        value=snapshot_state["balance"],
+                        on_change=lambda event: snapshot_state.__setitem__(
+                            "balance", event.value
+                        ),
                     ),
+                    "Saldo reale del conto alla data indicata; diventa la base della previsione.",
                 ).classes("min-w-[160px]")
-                ui.input(
-                    label="Nota",
-                    value=snapshot_state["note"],
-                    on_change=lambda event: snapshot_state.__setitem__(
-                        "note", event.value
+                add_tooltip(
+                    ui.input(
+                        label="Nota",
+                        value=snapshot_state["note"],
+                        on_change=lambda event: snapshot_state.__setitem__(
+                            "note", event.value
+                        ),
                     ),
+                    "Nota facoltativa per ricordare come hai verificato o riconciliato il saldo.",
                 ).classes("min-w-[260px]")
-                ui.button(icon="save", on_click=save_snapshot).props("round flat")
+                add_tooltip(
+                    ui.button(icon="save", on_click=save_snapshot),
+                    "Salva o aggiorna lo snapshot del saldo reale per il conto attivo.",
+                ).props("round flat")
 
     @ui.refreshable
     def render_settings() -> None:
@@ -1094,27 +1617,51 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     "Definisci la finestra predefinita usata dalla previsione."
                 ).style("color: #6b5b53")
                 with ui.row().classes("items-end gap-3"):
-                    forecast_window_input = ui.input(
-                        label="Finestra previsione (mesi)",
-                        value=settings_state["forecast_window_months"],
-                    ).classes("min-w-[220px]")
-                    ui.button(
-                        "Salva finestra",
-                        on_click=lambda _: save_forecast_window_months(
-                            forecast_window_input.value
+                    forecast_window_input = add_tooltip(
+                        ui.input(
+                            label="Finestra previsione (mesi)",
+                            value=settings_state["forecast_window_months"],
                         ),
+                        "Numero di mesi mostrati di default nella previsione del conto.",
+                    ).classes("min-w-[220px]")
+                    add_tooltip(
+                        ui.button(
+                            "Salva finestra",
+                            on_click=lambda _: save_forecast_window_months(
+                                forecast_window_input.value
+                            ),
+                        ),
+                        "Applica la nuova durata predefinita della previsione.",
                     )
 
                 with ui.row().classes("items-end gap-3 mt-3"):
-                    warning_margin_input = ui.input(
-                        label="Soglia attenzione (€)",
-                        value=settings_state["warning_margin"],
-                    ).classes("min-w-[220px]")
-                    ui.button(
-                        "Salva soglia",
-                        on_click=lambda _: save_warning_margin(
-                            warning_margin_input.value
+                    warning_margin_input = add_tooltip(
+                        ui.input(
+                            label="Soglia attenzione (€)",
+                            value=settings_state["warning_margin"],
                         ),
+                        "Margine sopra il fido entro cui la previsione segnala una situazione di attenzione.",
+                    ).classes("min-w-[220px]")
+                    add_tooltip(
+                        ui.button(
+                            "Salva soglia",
+                            on_click=lambda _: save_warning_margin(
+                                warning_margin_input.value
+                            ),
+                        ),
+                        "Salva la soglia usata per evidenziare i periodi a rischio.",
+                    )
+
+                with ui.row().classes("items-center gap-3 mt-3"):
+                    add_tooltip(
+                        ui.switch(
+                            text="Mostra tooltip guida",
+                            value=settings_state["helper_tooltips_enabled"],
+                            on_change=lambda event: save_helper_tooltips_enabled(
+                                bool(event.value)
+                            ),
+                        ),
+                        "Attiva o disattiva i suggerimenti contestuali sui controlli dell'interfaccia.",
                     )
 
             with ui.card().classes("w-full"):
@@ -1126,49 +1673,61 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 for account in accounts:
                     with ui.row().classes("w-full items-end gap-3"):
                         ui.label(account["name"]).classes("min-w-[140px]")
-                        overdraft_input = ui.input(
-                            label="Fido",
-                            value=str(account["overdraft_limit"] or 0),
-                        ).classes("min-w-[180px]")
-                        ui.button(
-                            "Salva",
-                            on_click=lambda _, acc_name=account["name"], field=overdraft_input: (
-                                save_overdraft_limit(acc_name, field.value)
+                        overdraft_input = add_tooltip(
+                            ui.input(
+                                label="Fido",
+                                value=str(account["overdraft_limit"] or 0),
                             ),
+                            f"Imposta il fido disponibile per il conto {account['name']}.",
+                        ).classes("min-w-[180px]")
+                        add_tooltip(
+                            ui.button(
+                                "Salva",
+                                on_click=lambda _, acc_name=account["name"], field=overdraft_input: (
+                                    save_overdraft_limit(acc_name, field.value)
+                                ),
+                            ),
+                            f"Salva il nuovo fido del conto {account['name']}.",
                         )
 
     with ui.tab_panels(tabs, value=dashboard_tab).classes("w-full"):
         with ui.tab_panel(dashboard_tab).classes("gap-4"):
             render_dashboard_header()
-            render_forecast()
-            render_manual_event_editor()
-            render_override_editor()
+            with ui.row().classes("w-full items-start gap-4 no-wrap"):
+                with ui.column().classes("min-w-0").style("flex: 1 1 0;"):
+                    render_forecast()
+                with ui.column().classes("gap-4").style("width: 320px; flex: 0 0 320px;"):
+                    with ui.column().classes("w-full sticky top-4 gap-4"):
+                        render_manual_event_editor()
+                        render_override_editor()
 
         with ui.tab_panel(rules_tab).classes("gap-4"):
             with ui.card().classes("w-full"):
-                with ui.row().classes("w-full items-center justify-between gap-4"):
-                    with ui.column().classes("gap-1"):
-                        ui.label("Regole").style("font-size: 22px; font-weight: 600")
-                        ui.label(
-                            "Le regole scadute restano storiche ma non sono piu attive nella previsione."
-                        ).style("color: #6b5b53")
-
-                    account_options = ["Tutti"] + [
-                        account["name"] for account in get_accounts()
-                    ]
-                    ui.select(
-                        options=account_options,
-                        value=rule_state["account_filter"],
-                        label="Filtra per conto",
-                        on_change=lambda event: (
-                            rule_state.__setitem__("account_filter", event.value),
-                            render_rule_stats.refresh(event.value),
-                            render_rules.refresh(event.value),
+                with ui.row().classes("items-center gap-3"):
+                    add_tooltip(
+                        ui.select(
+                            options=[account_row["name"] for account_row in get_accounts()],
+                            value=str(rule_state["account_filter"]),
+                            on_change=lambda event: (
+                                rule_state.__setitem__("account_filter", event.value),
+                                render_rule_stats.refresh(event.value),
+                                render_rules.refresh(event.value),
+                                refresh_rule_editor(),
+                            ),
                         ),
-                    ).classes("min-w-[220px]")
+                        "Scegli il conto di cui vuoi visualizzare le regole oppure tutte le regole.",
+                    ).classes("min-w-[240px]").style(
+                        "font-family: 'IBM Plex Mono', monospace; font-size: 28px; text-transform: uppercase; letter-spacing: 0.08em"
+                    )
 
-            render_rule_stats(rule_state["account_filter"])
-            render_rules(rule_state["account_filter"])
+            render_rule_stats(str(rule_state["account_filter"]))
+            with ui.row().classes("w-full items-start gap-4 no-wrap"):
+                with ui.column().classes("min-w-0 gap-2").style("flex: 1 1 0;"):
+                    with ui.scroll_area().classes("w-full h-[68vh] pr-2"):
+                        render_rules(str(rule_state["account_filter"]))
+                with ui.column().classes("min-w-0").style("width: 400px; flex: 0 0 400px;"):
+                    with ui.column().classes("w-full sticky top-0"):
+                        render_rule_editor()
 
         with ui.tab_panel(settings_tab).classes("gap-4"):
             render_settings()

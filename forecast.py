@@ -129,6 +129,11 @@ def _is_planned_credit_card_rule(event: ForecastEvent) -> bool:
     return event.description.strip().lower() == "carta di credito"
 
 
+def _format_description_amount(value: float) -> str:
+    text = f"{abs(value):.2f}".rstrip("0").rstrip(".")
+    return text.replace(".", ",")
+
+
 def _build_override_map(account_id: int) -> dict[tuple[int, date], dict]:
     overrides = [dict(row) for row in get_forecast_event_overrides(account_id)]
     return {
@@ -292,7 +297,12 @@ def build_account_forecast(
         total_amount = sum(event.amount for event in spends)
         planned_amount = sum(event.amount for event in planned)
         description = "Carta di credito"
-        if len(spends) == 1 and not planned:
+        if spends and planned:
+            description = (
+                "Carta di credito "
+                f"({_format_description_amount(total_amount)}+{_format_description_amount(planned_amount)})"
+            )
+        elif len(spends) == 1 and not planned:
             description = f"Carta di credito ({spends[0].description})"
         settlement_events.append(
             ForecastEvent(
