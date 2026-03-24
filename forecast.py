@@ -134,6 +134,15 @@ def _format_description_amount(value: float) -> str:
     return text.replace(".", ",")
 
 
+def _event_order_rank(event: ForecastEvent) -> tuple[int, str]:
+    description = event.description.strip().lower()
+    if description == "carta di credito calcolata":
+        return (1, description)
+    if "carta di credito" in description:
+        return (0, description)
+    return (2, description)
+
+
 def _build_override_map(account_id: int) -> dict[tuple[int, date], dict]:
     overrides = [dict(row) for row in get_forecast_event_overrides(account_id)]
     return {
@@ -249,7 +258,6 @@ def build_account_forecast(
     )
 
     direct_events: list[ForecastEvent] = []
-    planned_card_events: dict[date, list[ForecastEvent]] = defaultdict(list)
     card_buckets: dict[date, list[ForecastEvent]] = defaultdict(list)
 
     for rule in rules:
@@ -282,27 +290,16 @@ def build_account_forecast(
                     card_buckets[settlement_date].append(event)
                 continue
 
-            if _is_planned_credit_card_rule(event):
-                planned_card_events[event.event_date].append(event)
-                continue
-
             direct_events.append(event)
 
     settlement_events: list[ForecastEvent] = []
-    for settlement_date in sorted(
-        set(card_buckets.keys()) | set(planned_card_events.keys())
-    ):
+    for settlement_date in sorted(card_buckets.keys()):
         spends = card_buckets.get(settlement_date, [])
-        planned = planned_card_events.get(settlement_date, [])
         total_amount = sum(event.amount for event in spends)
-        planned_amount = sum(event.amount for event in planned)
-        description = "Carta di credito"
-        if spends and planned:
-            description = (
-                "Carta di credito "
-                f"({_format_description_amount(total_amount)}+{_format_description_amount(planned_amount)})"
-            )
-        elif len(spends) == 1 and not planned:
+        description = "Carta di credito calcolata"
+        if len(spends) > 1:
+            description = "Carta di credito calcolata"
+        elif len(spends) == 1:
             description = f"Carta di credito ({spends[0].description})"
         settlement_events.append(
             ForecastEvent(
@@ -312,14 +309,13 @@ def build_account_forecast(
                 account_name=account_name,
                 description=description,
                 original_description=description,
-                amount=total_amount + planned_amount,
-                original_amount=total_amount + planned_amount,
+                amount=total_amount,
+                original_amount=total_amount,
                 event_type="card_settlement",
                 source_rule_id=None,
                 account_id=account_id,
-                related_descriptions=[event.description for event in spends]
-                + [event.description for event in planned],
-                related_count=len(spends) + len(planned),
+                related_descriptions=[event.description for event in spends],
+                related_count=len(spends),
             )
         )
 
@@ -358,8 +354,8 @@ def build_account_forecast(
         key=lambda event: (
             event.ledger_date,
             event.event_date,
+            _event_order_rank(event),
             event.event_type,
-            event.description,
         ),
     )
 

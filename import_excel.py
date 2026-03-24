@@ -28,8 +28,8 @@ HEADER_ALIASES = {
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Import transaction rules from xlsx")
-    parser.add_argument("workbook", type=Path, help="Path to the xlsx workbook")
+    parser = argparse.ArgumentParser(description="Import transaction rules from Excel workbook")
+    parser.add_argument("workbook", type=Path, help="Path to the .xlsx or .xlsm workbook")
     return parser.parse_args()
 
 
@@ -183,8 +183,8 @@ def main() -> None:
     args = parse_args()
     workbook_path = args.workbook
 
-    if workbook_path.suffix.lower() != ".xlsx":
-        raise ValueError("Only .xlsx workbooks are supported")
+    if workbook_path.suffix.lower() not in {".xlsx", ".xlsm"}:
+        raise ValueError("Only .xlsx and .xlsm workbooks are supported")
     if not workbook_path.exists():
         raise FileNotFoundError(f"Workbook not found: {workbook_path}")
 

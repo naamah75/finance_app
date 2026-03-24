@@ -11,7 +11,7 @@ Build a simple personal finance app that starts local-first, stays easy to run, 
 - Data uses local SQLite in `finance.db`
 - The data model now includes `accounts`, `transaction_rules`, `account_snapshots`, `forecast_event_overrides`, and `manual_events`
 - The data model also includes app-level settings stored in SQLite, such as the default forecast window and warning threshold
-- Excel import currently reads compact rules from `xlsx` via `import_excel.py`
+- Excel import currently reads compact rules from `.xlsx` and `.xlsm` via `import_excel.py`
 - A first forecast engine draft lives in `forecast.py`
 - The UI now includes dedicated `Movimenti`, `Regole`, and `Impostazioni` tabs
 - The `Movimenti` tab is centered on one selected account at a time and shows editable snapshot inputs plus a movement-by-movement forecast table
@@ -92,7 +92,7 @@ Default local URL:
 - If `Pagamento` is `Carta`, the movement is first accumulated as card spending for the referenced bank account
 - Card spending is not charged immediately to the account balance; it is aggregated and charged on day `10` of the following month as the credit card debit
 - This card-settlement behavior should be modeled in forecasting logic, while the imported rule should preserve the original payment method and target account
-- If a planned direct-account rule already exists for `Carta di credito`, the forecast should merge that user-planned amount with the calculated card settlement into one final movement on the same day
+- If a planned direct-account rule already exists for `Carta di credito`, the forecast should currently keep that user-planned movement separate from the calculated card settlement row
 
 ## Override model
 
@@ -109,15 +109,15 @@ Default local URL:
 - `db.py` owns schema creation and basic SQLite helpers
 - `db.py` also stores lightweight UI/application settings in `app_settings`
 - `import_excel.py` is intended to be safe to rerun; for now it replaces imported `transaction_rules` from the latest workbook contents
-- `app.py` already includes a rule management view with filter by account, manual enable/disable, and automatic expired-state detection from `end_date`
-- `app.py` includes a `Movimenti` view focused on a single active account, with direct snapshot update inputs and a compact forecast table
+- `app.py` already includes a rule management view with filter by account, manual create/edit, manual enable/disable, and automatic expired-state detection from `end_date`
+- `app.py` includes a `Movimenti` view focused on a single active account, with direct snapshot update inputs, a compact forecast table, and collapsible one-off movement entry
 - The forecast table currently uses per-month background colors, movement/status icons, compact rows, and IBM Plex fonts for readability
 - `app.py` also includes a one-off manual movement entry form in `Movimenti`
 - The `Movimenti` table includes a `Programma` column that visualizes override/manual-event state via icons and tooltips
-- `app.py` includes an `Impostazioni` view for account overdraft values, default forecast window months, and the warning threshold used by the forecast UI
+- `app.py` includes an `Impostazioni` view for movement options, general settings, Excel import, and account overdraft values
 - Keep manual disable (`active`) separate from automatic expiry; do not overwrite manual intent when a rule becomes expired
 - `forecast.py` is the first draft of the projection engine and expands compact rules into dated forecast events
-- In the current forecast draft, `Conto` rules generate direct account events and `Carta` rules are aggregated into a single debit on day `10` of the following month
+- In the current forecast draft, `Conto` rules generate direct account events and `Carta` rules are aggregated into a separate debit on day `10` of the following month
 - `forecast.py` now also merges one-off manual movements and per-event overrides into the final forecast stream
 - The current forecast result also tracks min/max projected balance and account overdraft limits
 - While the Excel workbook is still the source of truth, re-run the import when the workbook changes
@@ -127,7 +127,7 @@ Default local URL:
 
 - keep the Excel import reliable so rules can be refreshed while the workbook is still being used
 - improve the `Movimenti` view and forecast UX so low-balance periods are easy to spot
-- add manual CRUD for rules so the app can eventually replace the workbook
+- keep refining the in-app CRUD for rules so the app can eventually replace the workbook
 - build clearer reconciliation flows around `account_snapshots`
 - keep refining the one-account-at-a-time workflow in `Movimenti` before expanding the rest of the UI
 - preserve simplicity and avoid over-engineering before the Excel-to-app transition

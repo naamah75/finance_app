@@ -1,8 +1,11 @@
+import tempfile
 from datetime import date, datetime
+from pathlib import Path
 
 from nicegui import ui
 
 from db import (
+    add_transaction_rule,
     add_manual_event,
     delete_forecast_event_override,
     get_account_by_name,
@@ -13,6 +16,7 @@ from db import (
     get_transaction_rules,
     init_db,
     is_rule_expired,
+    replace_transaction_rules,
     set_account_overdraft_limit,
     set_manual_event_status,
     set_setting,
@@ -23,6 +27,7 @@ from db import (
     upsert_account_snapshot,
 )
 from forecast import build_account_forecast
+from import_excel import extract_rules
 
 
 def format_balance(balance: float | None) -> str:
@@ -43,6 +48,40 @@ def format_ui_date(value: date | str | None) -> str:
     if isinstance(value, str):
         value = date.fromisoformat(value)
     return value.strftime("%d-%m-%Y")
+
+
+def format_ui_date_long(value: date | str | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        try:
+            value = date.fromisoformat(value)
+        except ValueError:
+            value = parse_ui_date(value)
+    weekdays = [
+        "Lunedi",
+        "Martedi",
+        "Mercoledi",
+        "Giovedi",
+        "Venerdi",
+        "Sabato",
+        "Domenica",
+    ]
+    months = [
+        "Gennaio",
+        "Febbraio",
+        "Marzo",
+        "Aprile",
+        "Maggio",
+        "Giugno",
+        "Luglio",
+        "Agosto",
+        "Settembre",
+        "Ottobre",
+        "Novembre",
+        "Dicembre",
+    ]
+    return f"{weekdays[value.weekday()]} {value.day} {months[value.month - 1]} {value.year}"
 
 
 def parse_ui_date(value: str) -> date:
@@ -80,6 +119,10 @@ def month_background(month: int) -> str:
         12: "#d9d6df",
     }
     return palette.get(month, "#fcf8f4")
+
+
+def month_selected_background(month: int) -> str:
+    return month_background(month)
 
 
 def add_months(base_date: date, months: int) -> date:
@@ -141,14 +184,27 @@ def get_rule_status(rule: dict) -> tuple[str, str]:
 def get_rule_card_style(is_selected: bool, status_color: str) -> str:
     base = (
         f"border-left: 7px solid {status_color}; border-top: 1px solid rgba(47, 36, 31, 0.08); "
-        f"border-right: 1px solid rgba(47, 36, 31, 0.08); border-bottom: 1px solid rgba(47, 36, 31, 0.08); "
+        f"border-right: 1px solid rgba(47, 36, 31, 0.08); border-bottom: 1px solid rgba(47, 36, 31, 0.08); padding: 6px 10px; "
     )
     if is_selected:
         return (
             base
-            + "background-color: #f3e7d4 !important; box-shadow: 0 8px 20px rgba(143, 106, 70, 0.14);"
+            + "background-color: #f3e7d4 !important; box-shadow: 0 6px 14px rgba(143, 106, 70, 0.12);"
         )
     return base + "background-color: #ffffff !important;"
+
+
+def get_rule_frequency_tint(rule: dict) -> str:
+    return "#f4efe2" if rule["frequency"] == "yearly" else "#eef4ea"
+
+
+def get_provider_options() -> list[str]:
+    providers = {
+        (dict(row)["provider"] or "").strip()
+        for row in get_transaction_rules()
+        if (dict(row)["provider"] or "").strip()
+    }
+    return sorted(providers)
 
 
 def load_rules(account_filter: str, show_expired: bool = False) -> list[dict]:
@@ -178,6 +234,14 @@ def clear_rule_selection(refresh_editor: bool = True) -> None:
     refresh_all_rule_views()
     if refresh_editor:
         refresh_rule_editor()
+
+
+def start_new_rule() -> None:
+    clear_rule_selection(refresh_editor=False)
+    rule_state["account_name"] = str(rule_state["account_filter"])
+    rule_state["active"] = True
+    refresh_all_rule_views()
+    refresh_rule_editor()
 
 
 def select_rule(rule_id: int | None, refresh_editor: bool = True) -> None:
@@ -221,10 +285,9 @@ def select_rule(rule_id: int | None, refresh_editor: bool = True) -> None:
 
 def save_rule_changes() -> None:
     rule_id = rule_state["selected_rule_id"]
-    if rule_id is None:
-        ui.notify("Seleziona prima una regola da modificare.", color="negative")
-        return
-    rule_id = int(str(rule_id))
+    is_new_rule = rule_id is None
+    if rule_id is not None:
+        rule_id = int(str(rule_id))
 
     account_name = str(rule_state["account_name"])
     description = str(rule_state["description"]).strip()
@@ -293,27 +356,44 @@ def save_rule_changes() -> None:
 
     payment_method = payment_method_text or None
 
-    update_transaction_rule(
-        rule_id=rule_id,
-        account_id=int(account["id"]),
-        description=description,
-        amount=amount,
-        frequency=frequency,
-        day_of_month=day_of_month,
-        month_of_year=month_of_year,
-        payment_method=payment_method,
-        provider=provider_text or None,
-        start_date=start_date,
-        end_date=end_date,
-        installments_total=installments_total,
-        active=active,
-    )
-    ui.notify("Regola aggiornata.", color="positive")
+    if is_new_rule:
+        rule_id = add_transaction_rule(
+            account_id=int(account["id"]),
+            description=description,
+            amount=amount,
+            frequency=frequency,
+            day_of_month=day_of_month,
+            month_of_year=month_of_year,
+            payment_method=payment_method,
+            provider=provider_text or None,
+            start_date=start_date,
+            end_date=end_date,
+            installments_total=installments_total,
+            active=active,
+        )
+        ui.notify("Nuova regola aggiunta.", color="positive")
+    else:
+        update_transaction_rule(
+            rule_id=rule_id,
+            account_id=int(account["id"]),
+            description=description,
+            amount=amount,
+            frequency=frequency,
+            day_of_month=day_of_month,
+            month_of_year=month_of_year,
+            payment_method=payment_method,
+            provider=provider_text or None,
+            start_date=start_date,
+            end_date=end_date,
+            installments_total=installments_total,
+            active=active,
+        )
+        ui.notify("Regola aggiornata.", color="positive")
     try_run_default_forecast()
     render_forecast.refresh()
     render_override_editor.refresh()
     refresh_all_rule_views()
-    select_rule(rule_id, refresh_editor=False)
+    select_rule(int(rule_id), refresh_editor=False)
     refresh_rule_editor()
 
 
@@ -346,6 +426,7 @@ def sync_snapshot_form(account_name: str) -> None:
 def select_active_account(account_name: str) -> None:
     dashboard_state["account_name"] = account_name
     forecast_state["account_name"] = account_name
+    forecast_state["selected_key"] = ""
     override_state["selected_key"] = ""
     sync_snapshot_form(account_name)
     refresh_forecast_defaults()
@@ -547,6 +628,35 @@ def save_helper_tooltips_enabled(enabled: bool) -> None:
     )
 
 
+def import_workbook(upload_event) -> None:
+    filename = (upload_event.name or "").strip()
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".xlsx", ".xlsm"}:
+        ui.notify("Importa un file Excel .xlsx o .xlsm.", color="negative")
+        return
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
+        temp_path = Path(temp_file.name)
+        temp_file.write(upload_event.content.read())
+
+    try:
+        rules = extract_rules(temp_path)
+        replace_transaction_rules(rules)
+    except Exception as exc:
+        ui.notify(f"Import Excel non riuscito: {exc}", color="negative")
+        return
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+    refresh_all_rule_views()
+    clear_rule_selection(refresh_editor=False)
+    try_run_default_forecast()
+    render_forecast.refresh()
+    render_override_editor.refresh()
+    render_manual_event_editor.refresh()
+    ui.notify(f"Importate {len(rules)} regole da {filename}.", color="positive")
+
+
 def run_forecast() -> None:
     account_name = forecast_state["account_name"]
     start_date_text = forecast_state["start_date"]
@@ -625,6 +735,7 @@ def save_manual_event() -> None:
         )
         ui.notify("Movimento manuale aggiornato.", color="positive")
 
+    manual_event_state["expanded"] = False
     clear_manual_event_selection(refresh_editor=False)
     manual_event_state["description"] = ""
     manual_event_state["amount"] = ""
@@ -637,6 +748,7 @@ def save_manual_event() -> None:
 def clear_manual_event_selection(refresh_editor: bool = True) -> None:
     manual_event_state["selected_event_id"] = None
     manual_event_state["selected_key"] = ""
+    manual_event_state["expanded"] = False
     manual_event_state["event_date"] = format_ui_date(date.today())
     manual_event_state["description"] = ""
     manual_event_state["amount"] = ""
@@ -647,22 +759,37 @@ def clear_manual_event_selection(refresh_editor: bool = True) -> None:
 
 
 def get_selected_forecast_key() -> str:
-    return manual_event_state["selected_key"] or override_state["selected_key"]
+    return str(forecast_state.get("selected_key") or "")
 
 
 def select_forecast_row(value: str | None) -> None:
     selected_key = value or ""
+    if selected_key and selected_key == get_selected_forecast_key():
+        forecast_state["selected_key"] = ""
+        clear_manual_event_selection(refresh_editor=False)
+        select_override_event(None, refresh_editor=False)
+        render_forecast.refresh()
+        render_manual_event_editor.refresh()
+        render_override_editor.refresh()
+        return
+
     selected_row = next(
         (row for row in override_state["rows"] if row["selection_key"] == selected_key),
         None,
     )
-
     if selected_row is None:
+        forecast_state["selected_key"] = ""
+        clear_manual_event_selection(refresh_editor=False)
+        select_override_event(None, refresh_editor=False)
+    elif selected_row["description"].strip().lower() == "carta di credito calcolata":
+        forecast_state["selected_key"] = selected_row["selection_key"]
         clear_manual_event_selection(refresh_editor=False)
         select_override_event(None, refresh_editor=False)
     elif selected_row["is_manual_event"]:
+        forecast_state["selected_key"] = selected_row["selection_key"]
         manual_event_state["selected_event_id"] = selected_row["source_manual_event_id"]
         manual_event_state["selected_key"] = selected_row["selection_key"]
+        manual_event_state["expanded"] = True
         manual_event_state["event_date"] = selected_row["date"]
         manual_event_state["description"] = selected_row["description"]
         manual_event_state["amount"] = selected_row["amount"]
@@ -670,12 +797,14 @@ def select_forecast_row(value: str | None) -> None:
         manual_event_state["note"] = selected_row["note"] or ""
         select_override_event(None, refresh_editor=False)
     else:
+        forecast_state["selected_key"] = selected_row["selection_key"]
         clear_manual_event_selection(refresh_editor=False)
         if selected_row["editable"]:
             select_override_event(selected_row["selection_key"], refresh_editor=False)
         else:
             select_override_event(None, refresh_editor=False)
 
+    render_forecast.refresh()
     render_manual_event_editor.refresh()
     render_override_editor.refresh()
 
@@ -691,6 +820,16 @@ def delete_manual_event() -> None:
     clear_manual_event_selection(refresh_editor=False)
     try_run_default_forecast()
     render_forecast.refresh()
+    render_manual_event_editor.refresh()
+
+
+def toggle_manual_event_editor() -> None:
+    manual_event_state["expanded"] = not bool(manual_event_state["expanded"])
+    render_manual_event_editor.refresh()
+
+
+def cancel_manual_event_editor() -> None:
+    clear_manual_event_selection(refresh_editor=False)
     render_manual_event_editor.refresh()
 
 
@@ -734,7 +873,7 @@ def select_override_event(value: str | None, refresh_editor: bool = True) -> Non
         override_state["override_amount"] = (
             f"{selected_row['override_amount']:.2f}"
             if selected_row["override_amount"] is not None
-            else ""
+            else f"{selected_row['amount_value']:.2f}"
         )
         override_state["resolution_mode"] = (
             selected_row["override_resolution_mode"] or "auto"
@@ -842,6 +981,7 @@ forecast_state = {
     "end_date": format_ui_date(add_months(date.today(), get_forecast_window_months())),
     "opening_balance": "",
     "result": None,
+    "selected_key": "",
 }
 dashboard_state = {
     "account_name": "Fineco",
@@ -854,6 +994,7 @@ settings_state = {
 manual_event_state = {
     "selected_event_id": None,
     "selected_key": "",
+    "expanded": False,
     "event_date": format_ui_date(date.today()),
     "description": "",
     "amount": "",
@@ -906,6 +1047,19 @@ ui.add_head_html(
         background: #fffdf8;
         border-top: 1px solid rgba(47, 36, 31, 0.08);
     }
+    .forecast-table .selected-marker-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 18px;
+        height: 18px;
+        color: #607d8b;
+        font-size: 16px;
+        visibility: hidden;
+    }
+    .forecast-table .selected-marker-icon.active {
+        visibility: visible;
+    }
     </style>
     """
 )
@@ -932,7 +1086,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
             if not rule["active"] and not is_rule_expired(rule["end_date"])
         ]
 
-        with ui.card().classes("w-full"):
+        with ui.card().classes("w-full").style("padding-top: 8px; padding-bottom: 6px;"):
             with ui.column().classes("w-full gap-0"):
                 with ui.row().classes("w-full items-center justify-between gap-4"):
                     ui.label("Riepilogo regole").style(
@@ -978,55 +1132,44 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 return
 
             for rule in rules:
-                status_text, status_color = get_rule_status(rule)
-                payment_method = (rule["payment_method"] or "n/d").capitalize()
+                _, status_color = get_rule_status(rule)
                 supplier = rule["provider"] or "-"
                 date_range = format_rule_validity(rule["start_date"], rule["end_date"])
                 is_selected = rule_state["selected_rule_id"] == int(rule["id"])
+                payment_icon = (
+                    "credit_card"
+                    if (rule["payment_method"] or "").lower() == "carta"
+                    else "account_balance_wallet"
+                )
 
                 card = ui.card().classes("w-full cursor-pointer transition-all")
-                card.style(get_rule_card_style(is_selected, status_color))
+                card.style(
+                    get_rule_card_style(is_selected, status_color)
+                    + f" background-color: {get_rule_frequency_tint(rule)} !important;"
+                )
                 card.on("click", lambda _, rule_id=rule["id"]: select_rule(int(rule_id)))
                 with card:
-                    with ui.row().classes(
-                        "w-full items-center justify-between gap-3 no-wrap"
-                    ):
-                        with ui.column().classes("gap-0"):
-                            ui.label(rule["description"]).style(
-                                f"font-size: 16px; font-weight: 600; color: {'#2f241f' if is_selected else '#3f342e'}"
+                    with ui.row().classes("w-full items-center justify-between gap-3 no-wrap"):
+                        with ui.row().classes("items-center gap-2 min-w-[220px] no-wrap"):
+                            ui.icon(payment_icon).style(
+                                f"font-size: 26px; color: {status_color}; margin-top: 4px; margin-right: 6px"
                             )
+                            with ui.column().classes("gap-0"):
+                                ui.label(rule["description"]).style(
+                                    f"font-size: 15px; line-height: 1.1; font-weight: 600; color: {'#2f241f' if is_selected else '#4f4540'}"
+                                )
+                                ui.label(
+                                    f"{rule['amount']:.2f} EUR"
+                                ).style("color: #72665f; font-size: 13px; line-height: 1.1; font-weight: 600")
+                        with ui.column().classes("gap-0 items-end"):
                             ui.label(
-                                f"{rule['account_name']} | {rule['amount']:.2f} EUR | {format_rule_frequency(rule)} | {format_cadence(rule)}"
-                            ).style("color: #6c5d55; font-size: 13px; line-height: 1.15")
-                            ui.label(
-                                f"Pagamento: {payment_method} | Fornitore: {supplier} | Validita: {date_range}"
-                            ).style("color: #7f726a; font-size: 12px; line-height: 1.15")
-
-                        with ui.column().classes("items-end gap-0"):
-                            add_tooltip(
-                                ui.icon("lens").style(
-                                    f"color: {status_color}; font-size: 18px"
-                                ),
-                                status_text,
+                                f"{format_rule_frequency(rule)} | {format_cadence(rule)}"
+                            ).style("color: #72665f; font-size: 12px; line-height: 1.1")
+                            ui.label(supplier).style(
+                                "color: #8b817c; font-size: 11px; line-height: 1.1"
                             )
-                            add_tooltip(
-                                ui.button(
-                                    icon="edit",
-                                    on_click=lambda _, rule_id=rule["id"]: select_rule(
-                                        int(rule_id)
-                                    ),
-                                ).props("round flat"),
-                                "Carica questa regola nel pannello di modifica.",
-                            )
-                            add_tooltip(
-                                ui.switch(
-                                text="Abilitata",
-                                value=bool(rule["active"]),
-                                on_change=lambda event, rule_id=rule["id"]: toggle_rule(
-                                    rule_id, bool(event.value)
-                                ),
-                                ),
-                                "Attiva o disattiva manualmente questa regola senza cancellarla.",
+                            ui.label(date_range).style(
+                                "color: #8b817c; font-size: 11px; line-height: 1.1"
                             )
 
     @ui.refreshable
@@ -1047,7 +1190,26 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
         active = bool(rule_state["active"])
 
         with ui.card().classes("w-full"):
-            ui.label("Modifica regola").style("font-size: 22px; font-weight: 600")
+            with ui.row().classes("w-full items-center justify-between gap-3").style("margin-top: -10px;"):
+                ui.label(
+                    "Modifica regola" if selected_rule_id is not None else "Nuova regola"
+                ).style("font-size: 18px; font-weight: 600")
+                if selected_rule_id is None:
+                    add_tooltip(
+                        ui.button(icon="add", on_click=start_new_rule).props("round flat"),
+                        "Prepara il form per inserire una nuova regola.",
+                    )
+                if selected_rule_id is not None:
+                    add_tooltip(
+                        ui.switch(
+                            text="Abilitata",
+                            value=active,
+                            on_change=lambda event: rule_state.__setitem__(
+                                "active", bool(event.value)
+                            ),
+                        ),
+                        "Attiva o disattiva manualmente questa regola senza cancellarla.",
+                    )
             if selected_rule_id is None:
                 return
 
@@ -1127,8 +1289,11 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     "Conto applica il movimento subito; Carta lo porta al saldo carta del mese successivo.",
                 ).classes("w-full")
                 add_tooltip(
-                    ui.input(
+                    ui.select(
                         label="Fornitore",
+                        with_input=True,
+                        new_value_mode="add-unique",
+                        options=get_provider_options(),
                         value=supplier,
                         on_change=lambda event: rule_state.__setitem__(
                             "provider", event.value
@@ -1166,16 +1331,6 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     ),
                     "Numero totale rate, se la regola rappresenta un pagamento rateale.",
                 ).classes("w-full")
-                add_tooltip(
-                    ui.switch(
-                        text="Abilitata manualmente",
-                        value=active,
-                        on_change=lambda event: rule_state.__setitem__(
-                            "active", bool(event.value)
-                        ),
-                    ),
-                    "Mantiene la regola attiva o disattiva senza cancellarla.",
-                )
                 with ui.row().classes("w-full justify-end gap-2 pt-0"):
                     add_tooltip(
                         ui.button(icon="close", on_click=clear_rule_selection).props(
@@ -1203,6 +1358,8 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     ).style("color: #7a6a62")
                 return
 
+            selected_forecast_key = get_selected_forecast_key()
+
             forecast_rows = []
             running_balance = result.opening_balance
             previous_month_key = None
@@ -1227,11 +1384,14 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         "selection_key": f"{event.source_rule_id or 'settlement'}|{event.original_event_date.isoformat()}|{index}",
                         "is_selected": False,
                         "row_bg": month_background(event.event_date.month),
+                        "selected_bg": month_selected_background(event.event_date.month),
+                        "selected_border": "#2f241f",
                         "month_break": previous_month_key is not None
                         and month_key != previous_month_key,
                         "date": format_ui_date(event.event_date),
                         "type": type_icon,
                         "description": event.description,
+                        "description_label": event.description,
                         "original_description": event.original_description,
                         "source_rule_id": event.source_rule_id,
                         "source_manual_event_id": event.source_manual_event_id,
@@ -1262,12 +1422,51 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         "balance_value": round(running_balance, 2),
                         "balance": format_currency(running_balance),
                         "status": balance_status,
+                        "related_descriptions": list(getattr(event, "related_descriptions", []) or []),
                     }
                 )
                 previous_month_key = month_key
 
+            for row in forecast_rows:
+                row["is_selected"] = row["selection_key"] == selected_forecast_key
+
+            selected_forecast_row = next(
+                (row for row in forecast_rows if row["is_selected"]),
+                None,
+            )
+
+            with ui.card().classes("w-full"):
+                if selected_forecast_row is None:
+                    ui.label("Nessun movimento selezionato.").style(
+                        "color: #9a9089; font-size: 13px"
+                    )
+                else:
+                    amount_text = selected_forecast_row["amount"]
+                    clean_amount = amount_text[1:] if amount_text.startswith("-") else amount_text
+                    amount_with_symbol = f"€{clean_amount}"
+                    movement_label = (
+                        "addebito"
+                        if selected_forecast_row["amount_value"] < 0
+                        else "accredito"
+                    )
+                    ui.label(
+                        f"{format_ui_date_long(selected_forecast_row['date'])}, {movement_label} di {amount_with_symbol} per {selected_forecast_row['description']}"
+                    ).style("font-family: 'IBM Plex Mono', monospace; font-size: 11px; font-weight: 600; color: #2f241f")
+                    if selected_forecast_row["description"].strip().lower() == "carta di credito calcolata":
+                        details = selected_forecast_row["related_descriptions"]
+                        if details:
+                            ui.label("Componenti: " + " | ".join(details)).style(
+                                "font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: #6b5b53"
+                            )
+
             table = ui.table(
                 columns=[
+                    {
+                        "name": "status",
+                        "label": "Stato",
+                        "field": "status",
+                        "align": "center",
+                    },
                     {"name": "date", "label": "Data", "field": "date", "align": "left"},
                     {
                         "name": "schedule",
@@ -1299,12 +1498,6 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         "field": "balance",
                         "align": "right",
                     },
-                    {
-                        "name": "status",
-                        "label": "Stato",
-                        "field": "status",
-                        "align": "center",
-                    },
                 ],
                 rows=forecast_rows,
                 row_key="id",
@@ -1313,26 +1506,22 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
             table.props('table-style="max-height: 990px"')
             table.style("font-family: 'IBM Plex Mono', monospace; font-size: 11px")
             override_state["rows"] = forecast_rows
-            selected_forecast_key = get_selected_forecast_key()
             available_rows = [row for row in forecast_rows if row["editable"]]
             if override_state["selected_key"] and not any(
                 row["selection_key"] == override_state["selected_key"]
                 for row in available_rows
             ):
                 override_state["selected_key"] = ""
-            if not override_state["selected_key"] and available_rows:
-                select_override_event(
-                    available_rows[0]["selection_key"], refresh_editor=False
-                )
-            selected_forecast_key = get_selected_forecast_key()
-            for row in forecast_rows:
-                row["is_selected"] = row["selection_key"] == selected_forecast_key
             table.add_slot(
                 "body",
                 r"""
-                <q-tr :props="props" @click="() => $parent.$emit('select_override_row', props.row.selection_key)" class="cursor-pointer" :style="'background-color:' + props.row.row_bg + '; border-top:' + (props.row.month_break ? '4px solid #8f7f73' : '0') + '; box-shadow:' + (props.row.is_selected ? 'inset 0 0 0 2px #2f241f' : 'none')">
-                    <q-td key="date" :props="props" style="padding-top: 2px; padding-bottom: 2px">{{ props.row.date }}</q-td>
-                    <q-td key="schedule" :props="props" class="text-center">
+                <q-tr :props="props" @click="() => $parent.$emit('select_override_row', props.row.selection_key)" :class="props.row.is_selected ? 'cursor-pointer forecast-selected-row' : 'cursor-pointer'" :style="'background-color:' + props.row.row_bg + '; border-top:' + (props.row.month_break ? '4px solid #8f7f73' : '0')">
+                    <q-td key="status" :props="props" class="text-center" :style="'background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
+                        <q-icon v-if="props.row.is_selected" name="edit" color="blue-grey-6" size="sm" />
+                        <q-icon v-else :name="props.row.status" :color="props.row.status === 'dangerous' ? 'negative' : (props.row.status === 'warning' ? 'warning' : 'positive')" size="sm" />
+                    </q-td>
+                    <q-td key="date" :props="props" :style="'padding-top: 2px; padding-bottom: 2px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">{{ props.row.date }}</q-td>
+                    <q-td key="schedule" :props="props" class="text-center" :style="'background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
                         <q-icon v-if="props.row.is_manual_event" name="add_task" color="teal" size="sm">
                             <q-tooltip>Movimento manuale una tantum</q-tooltip>
                         </q-icon>
@@ -1352,20 +1541,17 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         </template>
                         <q-icon v-else name="radio_button_unchecked" color="grey-5" size="xs" />
                     </q-td>
-                    <q-td key="type" :props="props" class="text-center">
+                    <q-td key="type" :props="props" class="text-center" :style="'background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
                         <q-icon :name="props.row.type" :color="props.row.amount_value < 0 ? 'negative' : 'positive'" size="sm" />
                     </q-td>
-                    <q-td key="description" :props="props" style="padding-top: 2px; padding-bottom: 2px">
+                    <q-td key="description" :props="props" :style="'padding-top: 2px; padding-bottom: 2px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
                         <div class="row items-center no-wrap">
                             <q-icon v-if="props.row.carried_overdue" name="history" color="warning" size="xs" class="q-mr-xs" />
-                            <span>{{ props.row.description }}</span>
+                            <span>{{ props.row.description_label }}</span>
                         </div>
                     </q-td>
-                    <q-td key="amount" :props="props" style="padding-top: 2px; padding-bottom: 2px" :class="props.row.amount_value < 0 ? 'text-[#8a1c1c]' : 'text-[#1f7a1f]'">{{ props.row.amount }}</q-td>
-                    <q-td key="balance" :props="props" style="padding-top: 2px; padding-bottom: 2px" :class="props.row.balance_value < 0 ? 'text-[#8a1c1c] font-semibold' : 'text-[#2f241f] font-semibold'">{{ props.row.balance }}</q-td>
-                    <q-td key="status" :props="props" class="text-center">
-                        <q-icon :name="props.row.status" :color="props.row.status === 'dangerous' ? 'negative' : (props.row.status === 'warning' ? 'warning' : 'positive')" size="sm" />
-                    </q-td>
+                    <q-td key="amount" :props="props" :style="'padding-top: 2px; padding-bottom: 2px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)" :class="props.row.amount_value < 0 ? 'text-[#8a1c1c]' : 'text-[#1f7a1f]'">{{ props.row.amount }}</q-td>
+                    <q-td key="balance" :props="props" :style="'padding-top: 2px; padding-bottom: 2px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)" :class="props.row.balance_value < 0 ? 'text-[#8a1c1c] font-semibold' : 'text-[#2f241f] font-semibold'">{{ props.row.balance }}</q-td>
                 </q-tr>
                 """,
             )
@@ -1377,11 +1563,27 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
             title = (
                 "Modifica movimento una tantum"
                 if manual_event_state["selected_event_id"] is not None
-                else "Aggiungi movimento una tantum"
+                else "Movimento una tantum"
             )
-            ui.label(title).style(
-                "font-size: 18px; font-weight: 600"
-            )
+            with ui.row().classes("w-full items-center justify-between gap-2").style("margin-top: -10px;"):
+                ui.label(title).style("font-size: 18px; font-weight: 600")
+                if manual_event_state["selected_event_id"] is None:
+                    add_tooltip(
+                        ui.button(icon="add", on_click=toggle_manual_event_editor).props(
+                            "round flat"
+                        ),
+                        "Apri o chiudi il riquadro del movimento una tantum.",
+                    )
+                if manual_event_state["selected_event_id"] is not None:
+                    add_tooltip(
+                        ui.button(
+                            icon=("expand_less" if manual_event_state["expanded"] else "expand_more"),
+                            on_click=toggle_manual_event_editor,
+                        ).props("round flat"),
+                        "Apri o chiudi il riquadro del movimento una tantum.",
+                    )
+            if not manual_event_state["expanded"] and manual_event_state["selected_event_id"] is None:
+                return
             if manual_event_state["selected_event_id"] is not None:
                 ui.label(
                     "Hai selezionato un movimento manuale dalla tabella: puoi aggiornarlo o annullarlo."
@@ -1437,9 +1639,14 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                             ui.button(icon="delete", on_click=delete_manual_event),
                             "Annulla il movimento manuale selezionato e toglilo dalla previsione.",
                         ).props("round flat")
+                    else:
+                        add_tooltip(
+                            ui.button(icon="close", on_click=cancel_manual_event_editor),
+                            "Chiudi il riquadro senza salvare il movimento.",
+                        ).props("round flat")
                     add_tooltip(
                         ui.button(
-                            icon=("save" if manual_event_state["selected_event_id"] is not None else "add"),
+                            icon="save",
                             on_click=save_manual_event,
                         ),
                         "Salva questo movimento manuale oppure aggiorna quello selezionato.",
@@ -1448,15 +1655,30 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
     @ui.refreshable
     def render_override_editor() -> None:
         editable_rows = [row for row in override_state["rows"] if row["editable"]]
+        selected_editable_row = next(
+            (
+                row
+                for row in editable_rows
+                if row["selection_key"] == override_state["selected_key"]
+            ),
+            None,
+        )
 
         with ui.card().classes("w-full"):
             ui.label("Personalizzazione movimento").style(
+                "margin-top: -6px; "
                 "font-size: 18px; font-weight: 600"
             )
             if not editable_rows:
                 ui.label(
                     "Nessun movimento modificabile nella finestra di previsione."
                 ).style("color: #6b5b53")
+                return
+
+            if not override_state["selected_key"]:
+                ui.label("Nessun movimento selezionato.").style(
+                    "color: #9a9089; font-size: 13px"
+                )
                 return
 
             event_options = {
@@ -1533,10 +1755,11 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     "Stato operativo dell'override selezionato.",
                 ).classes("w-full")
                 with ui.row().classes("w-full justify-end gap-2 pt-0"):
-                    add_tooltip(
-                        ui.button(icon="delete", on_click=clear_event_override),
-                        "Rimuove l'override e ripristina il movimento originale della regola.",
-                    ).props("round flat")
+                    if selected_editable_row and selected_editable_row["has_override"]:
+                        add_tooltip(
+                            ui.button(icon="restore_page", on_click=clear_event_override),
+                            "Ripristina il movimento originale dal database rimuovendo l'override.",
+                        ).props("round flat")
                     add_tooltip(
                         ui.button(icon="save", on_click=save_event_override),
                         "Salva la personalizzazione del movimento selezionato.",
@@ -1546,7 +1769,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
     def render_dashboard_header() -> None:
         with ui.card().classes("w-full"):
             with ui.column().classes("w-full gap-3"):
-                with ui.row().classes("items-center gap-3"):
+                with ui.row().classes("items-center gap-3").style("margin-top: -10px;"):
                     add_tooltip(
                         ui.select(
                         options=[account_row["name"] for account_row in get_accounts()],
@@ -1610,12 +1833,10 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
 
         with ui.column().classes("w-full gap-3"):
             with ui.card().classes("w-full"):
-                ui.label("Impostazioni previsione").style(
+                ui.label("Opzioni movimenti").style(
+                    "margin-top: -6px; "
                     "font-size: 22px; font-weight: 600"
                 )
-                ui.label(
-                    "Definisci la finestra predefinita usata dalla previsione."
-                ).style("color: #6b5b53")
                 with ui.row().classes("items-end gap-3"):
                     forecast_window_input = add_tooltip(
                         ui.input(
@@ -1652,7 +1873,16 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         "Salva la soglia usata per evidenziare i periodi a rischio.",
                     )
 
-                with ui.row().classes("items-center gap-3 mt-3"):
+            with ui.card().classes("w-full"):
+                ui.label("Impostazioni generali").style(
+                    "margin-top: -6px; "
+                    "font-size: 22px; font-weight: 600"
+                )
+                ui.label("Preferenze dell'interfaccia e del progetto.").style(
+                    "color: #6b5b53"
+                )
+
+                with ui.row().classes("items-center gap-3").style("margin-top: -10px;"):
                     add_tooltip(
                         ui.switch(
                             text="Mostra tooltip guida",
@@ -1665,7 +1895,26 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     )
 
             with ui.card().classes("w-full"):
-                ui.label("Fido conti").style("font-size: 22px; font-weight: 600")
+                ui.label("Importazione Excel").style(
+                    "margin-top: -6px; "
+                    "font-size: 22px; font-weight: 600"
+                )
+                ui.label("Importa regole da un file Excel del piano economico.").style(
+                    "color: #6b5b53"
+                )
+
+                with ui.row().classes("items-center gap-3"):
+                    add_tooltip(
+                        ui.upload(
+                            label="Importa file Excel",
+                            auto_upload=True,
+                            on_upload=import_workbook,
+                        ).props('accept=".xlsx,.xlsm"'),
+                        "Importa regole da un file Excel .xlsx o .xlsm e aggiorna il database.",
+                    ).classes("min-w-[260px]")
+
+            with ui.card().classes("w-full"):
+                ui.label("Fido conti").style("margin-top: -6px; font-size: 22px; font-weight: 600")
                 ui.label("Imposta il fido disponibile per ogni conto.").style(
                     "color: #6b5b53"
                 )

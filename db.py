@@ -241,6 +241,65 @@ def replace_transaction_rules(rules: list[dict]) -> None:
     conn.close()
 
 
+def add_transaction_rule(
+    account_id: int,
+    description: str,
+    amount: float,
+    frequency: str,
+    day_of_month: int,
+    month_of_year: int | None,
+    payment_method: str | None,
+    provider: str | None,
+    start_date: str | None,
+    end_date: str | None,
+    installments_total: int | None,
+    active: bool,
+    source_sheet: str | None = None,
+) -> int:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO transaction_rules (
+            account_id,
+            description,
+            amount,
+            frequency,
+            day_of_month,
+            month_of_year,
+            payment_method,
+            provider,
+            start_date,
+            end_date,
+            installments_total,
+            card_settlement_day,
+            source_sheet,
+            active
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            account_id,
+            description,
+            amount,
+            frequency,
+            day_of_month,
+            month_of_year,
+            payment_method,
+            provider,
+            start_date,
+            end_date,
+            installments_total,
+            10 if payment_method == "carta" else None,
+            source_sheet,
+            1 if active else 0,
+        ),
+    )
+    new_id = int(cur.lastrowid)
+    conn.commit()
+    conn.close()
+    return new_id
+
+
 def get_accounts() -> list[sqlite3.Row]:
     conn = get_connection()
     cur = conn.cursor()

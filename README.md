@@ -13,7 +13,7 @@ The project is no longer just a prototype. It now includes:
 - per-event overrides in `forecast_event_overrides`
 - one-off planned movements in `manual_events`
 - app settings in SQLite for forecast behavior
-- Excel import from `xlsx` via `import_excel.py`
+- Excel import from `.xlsx` and `.xlsm` via `import_excel.py` and from the UI
 - first forecast engine in `forecast.py`
 
 ## Current UI
@@ -21,8 +21,8 @@ The project is no longer just a prototype. It now includes:
 The app currently has three main tabs:
 
 - `Movimenti`: one account at a time, with snapshot editing, one-off movement entry, event customization, and movement-by-movement forecast table
-- `Regole`: imported rules, manual enable/disable, expired-state handling
-- `Impostazioni`: account overdraft values, default forecast window, and warning threshold
+- `Regole`: filtered rules per account, manual create/edit, enable/disable, expired-state handling, and provider suggestions
+- `Impostazioni`: movement options, general settings, Excel import, and account overdraft values
 
 The `Movimenti` tab is currently the main operational view.
 
@@ -41,7 +41,7 @@ The `Movimenti` tab is currently the main operational view.
 
 - If `Pagamento` is `Conto`, the movement hits the account directly on its due date
 - If `Pagamento` is `Carta`, spending is accumulated and charged to the account on day `10` of the following month
-- If a planned direct-account rule already exists for `Carta di credito`, the engine merges that planned amount with the calculated card settlement into one final movement
+- Planned `Carta di credito` rules and calculated card settlements are shown as separate movements
 
 ## Overrides and one-off movements
 
@@ -57,7 +57,7 @@ The `Movimenti` tab is currently the main operational view.
 
 - `app.py`: NiceGUI interface
 - `db.py`: SQLite schema and helpers
-- `import_excel.py`: imports rules from `xlsx`
+- `import_excel.py`: imports rules from `.xlsx` and `.xlsm`
 - `forecast.py`: expands compact rules into forecast events
 - `AGENTS.md`: project notes and guidance for future sessions
 
@@ -101,6 +101,8 @@ Put the planning workbook in the project folder and run:
 python import_excel.py "Piano economico.xlsx"
 ```
 
+You can also import the workbook from the `Impostazioni` tab.
+
 Note:
 
 - the real workbook is treated as local input data and should not be committed
@@ -135,7 +137,6 @@ OneDrive is useful for having the folder available across machines, but Git shou
 ## Near-term next steps
 
 - improve the one-account-at-a-time `Movimenti` workflow
-- add manual create/edit of rules directly in the app
 - add clearer reconciliation flows around snapshots
 - improve forecast presentation with charts and timeline views
 - prepare the eventual switch from Excel-managed rules to app-managed rules
