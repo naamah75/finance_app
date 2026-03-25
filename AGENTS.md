@@ -109,9 +109,9 @@ Default local URL:
 - `db.py` owns schema creation and basic SQLite helpers
 - `db.py` also stores lightweight UI/application settings in `app_settings`
 - `import_excel.py` is intended to be safe to rerun; for now it replaces imported `transaction_rules` from the latest workbook contents
-- `app.py` already includes a rule management view with filter by account, manual create/edit, manual enable/disable, and automatic expired-state detection from `end_date`
-- `app.py` includes a `Movimenti` view focused on a single active account, with direct snapshot update inputs, a compact forecast table, and collapsible one-off movement entry
-- The forecast table currently uses per-month background colors, movement/status icons, compact rows, and IBM Plex fonts for readability
+- `app.py` already includes a rule management view with filter by account, manual create/edit/delete, manual enable/disable, automatic expired-state detection from `end_date`, provider suggestions, and schedule auto-fill from start/end date or installments
+- `app.py` includes a `Movimenti` view focused on a single active account, with direct snapshot update inputs, a compact forecast table with month separators and status-based row colors, and collapsible one-off movement entry
+- The forecast table currently uses month separator rows, month accent bars, selection/edit indicators, compact rows, and IBM Plex fonts for readability
 - `app.py` also includes a one-off manual movement entry form in `Movimenti`
 - The `Movimenti` table includes a `Programma` column that visualizes override/manual-event state via icons and tooltips
 - `app.py` includes an `Impostazioni` view for movement options, general settings, Excel import, and account overdraft values

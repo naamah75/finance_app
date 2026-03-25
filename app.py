@@ -7,6 +7,7 @@ from nicegui import ui
 from db import (
     add_transaction_rule,
     add_manual_event,
+    delete_transaction_rule,
     delete_forecast_event_override,
     get_account_by_name,
     get_accounts,
@@ -84,6 +85,33 @@ def format_ui_date_long(value: date | str | None) -> str:
     return f"{weekdays[value.weekday()]} {value.day} {months[value.month - 1]} {value.year}"
 
 
+def format_month_label(value: date) -> str:
+    months = [
+        "Gennaio",
+        "Febbraio",
+        "Marzo",
+        "Aprile",
+        "Maggio",
+        "Giugno",
+        "Luglio",
+        "Agosto",
+        "Settembre",
+        "Ottobre",
+        "Novembre",
+        "Dicembre",
+    ]
+    return f"{months[value.month - 1]} {value.year}"
+
+
+def format_html_date(value: str | None) -> str:
+    if not value:
+        return ""
+    try:
+        return parse_ui_date(value).isoformat()
+    except ValueError:
+        return value
+
+
 def parse_ui_date(value: str) -> date:
     return datetime.strptime(value, "%d-%m-%Y").date()
 
@@ -121,6 +149,33 @@ def month_background(month: int) -> str:
     return palette.get(month, "#fcf8f4")
 
 
+def movement_status_background(status: str) -> str:
+    palette = {
+        "check_circle": "#eef7ee",
+        "warning": "#fbf1d9",
+        "dangerous": "#f7e2e2",
+    }
+    return palette.get(status, "#fcf8f4")
+
+
+def month_accent_color(month: int) -> str:
+    palette = {
+        1: "#cf9a86",
+        2: "#c9b27a",
+        3: "#9eb97c",
+        4: "#82b49d",
+        5: "#7eb6b0",
+        6: "#84a7c2",
+        7: "#919dc8",
+        8: "#a393c8",
+        9: "#bc97bf",
+        10: "#c89a84",
+        11: "#bba487",
+        12: "#a8a0b5",
+    }
+    return palette.get(month, "#b7ada2")
+
+
 def month_selected_background(month: int) -> str:
     return month_background(month)
 
@@ -131,6 +186,62 @@ def add_months(base_date: date, months: int) -> date:
     month = (month_index % 12) + 1
     day = min(base_date.day, 28)
     return date(year, month, day)
+
+
+def add_years(base_date: date, years: int) -> date:
+    target_year = base_date.year + years
+    day = min(base_date.day, 28) if base_date.month == 2 else base_date.day
+    return date(target_year, base_date.month, day)
+
+
+def sync_rule_schedule_fields(changed_field: str) -> None:
+    start_date_text = str(rule_state["start_date"] or "").strip()
+    end_date_text = str(rule_state["end_date"] or "").strip()
+    installments_text = str(rule_state["installments_total"] or "").strip()
+    frequency = str(rule_state["frequency"])
+
+    if not start_date_text:
+        return
+
+    try:
+        start_dt = parse_ui_date(start_date_text)
+    except ValueError:
+        return
+
+    if changed_field == "installments_total" and installments_text:
+        try:
+            installments = int(installments_text)
+        except ValueError:
+            return
+        if installments < 1:
+            return
+        end_dt = (
+            add_months(start_dt, installments - 1)
+            if frequency == "monthly"
+            else add_years(start_dt, installments - 1)
+        )
+        rule_state["end_date"] = format_ui_date(end_dt)
+        return
+
+    if changed_field == "end_date" and end_date_text:
+        try:
+            end_dt = parse_ui_date(end_date_text)
+        except ValueError:
+            return
+        if end_dt < start_dt:
+            return
+        if frequency == "monthly":
+            months = (end_dt.year - start_dt.year) * 12 + (end_dt.month - start_dt.month)
+            rule_state["installments_total"] = str(months + 1)
+        else:
+            rule_state["installments_total"] = str((end_dt.year - start_dt.year) + 1)
+        return
+
+    if changed_field == "start_date":
+        if installments_text and not end_date_text:
+            sync_rule_schedule_fields("installments_total")
+        elif end_date_text and not installments_text:
+            sync_rule_schedule_fields("end_date")
 
 
 def get_forecast_window_months() -> int:
@@ -218,6 +329,7 @@ def load_rules(account_filter: str, show_expired: bool = False) -> list[dict]:
 
 def clear_rule_selection(refresh_editor: bool = True) -> None:
     rule_state["selected_rule_id"] = None
+    rule_state["creating_new"] = False
     rule_state["account_name"] = dashboard_state["account_name"]
     rule_state["description"] = ""
     rule_state["amount"] = ""
@@ -226,7 +338,7 @@ def clear_rule_selection(refresh_editor: bool = True) -> None:
     rule_state["month_of_year"] = ""
     rule_state["payment_method"] = "Conto"
     rule_state["provider"] = ""
-    rule_state["start_date"] = ""
+    rule_state["start_date"] = format_ui_date(date.today())
     rule_state["end_date"] = ""
     rule_state["installments_total"] = ""
     rule_state["active"] = True
@@ -238,6 +350,7 @@ def clear_rule_selection(refresh_editor: bool = True) -> None:
 
 def start_new_rule() -> None:
     clear_rule_selection(refresh_editor=False)
+    rule_state["creating_new"] = True
     rule_state["account_name"] = str(rule_state["account_filter"])
     rule_state["active"] = True
     refresh_all_rule_views()
@@ -261,6 +374,7 @@ def select_rule(rule_id: int | None, refresh_editor: bool = True) -> None:
         return
 
     rule_state["selected_rule_id"] = int(selected_rule["id"])
+    rule_state["creating_new"] = False
     rule_state["account_name"] = selected_rule["account_name"]
     rule_state["description"] = selected_rule["description"]
     rule_state["amount"] = f"{float(selected_rule['amount']):.2f}"
@@ -285,7 +399,7 @@ def select_rule(rule_id: int | None, refresh_editor: bool = True) -> None:
 
 def save_rule_changes() -> None:
     rule_id = rule_state["selected_rule_id"]
-    is_new_rule = rule_id is None
+    is_new_rule = bool(rule_state.get("creating_new")) and rule_id is None
     if rule_id is not None:
         rule_id = int(str(rule_id))
 
@@ -393,7 +507,23 @@ def save_rule_changes() -> None:
     render_forecast.refresh()
     render_override_editor.refresh()
     refresh_all_rule_views()
-    select_rule(int(rule_id), refresh_editor=False)
+    clear_rule_selection(refresh_editor=False)
+    refresh_rule_editor()
+
+
+def delete_selected_rule() -> None:
+    rule_id = rule_state["selected_rule_id"]
+    if rule_id is None:
+        ui.notify("Seleziona prima una regola da eliminare.", color="negative")
+        return
+
+    delete_transaction_rule(int(rule_id))
+    ui.notify("Regola eliminata.", color="positive")
+    clear_rule_selection(refresh_editor=False)
+    try_run_default_forecast()
+    render_forecast.refresh()
+    render_override_editor.refresh()
+    refresh_all_rule_views()
     refresh_rule_editor()
 
 
@@ -768,7 +898,9 @@ def select_forecast_row(value: str | None) -> None:
         forecast_state["selected_key"] = ""
         clear_manual_event_selection(refresh_editor=False)
         select_override_event(None, refresh_editor=False)
-        render_forecast.refresh()
+        ui.run_javascript(
+            "document.querySelectorAll('.forecast-table tr[data-selection-key]').forEach(row => row.classList.remove('forecast-selected-row'))"
+        )
         render_manual_event_editor.refresh()
         render_override_editor.refresh()
         return
@@ -804,7 +936,9 @@ def select_forecast_row(value: str | None) -> None:
         else:
             select_override_event(None, refresh_editor=False)
 
-    render_forecast.refresh()
+    ui.run_javascript(
+        f"document.querySelectorAll('.forecast-table tr[data-selection-key]').forEach(row => row.classList.toggle('forecast-selected-row', row.dataset.selectionKey === {selected_key!r}))"
+    )
     render_manual_event_editor.refresh()
     render_override_editor.refresh()
 
@@ -954,6 +1088,7 @@ rule_state: dict[str, object] = {
     "account_filter": "Fineco",
     "show_expired": False,
     "selected_rule_id": None,
+    "creating_new": False,
     "account_name": "Fineco",
     "description": "",
     "amount": "",
@@ -962,7 +1097,7 @@ rule_state: dict[str, object] = {
     "month_of_year": "",
     "payment_method": "Conto",
     "provider": "",
-    "start_date": "",
+    "start_date": format_ui_date(date.today()),
     "end_date": "",
     "installments_total": "",
     "active": True,
@@ -1047,18 +1182,20 @@ ui.add_head_html(
         background: #fffdf8;
         border-top: 1px solid rgba(47, 36, 31, 0.08);
     }
-    .forecast-table .selected-marker-icon {
-        display: inline-flex;
+    .forecast-table .row-edit-icon {
+        display: none;
         align-items: center;
         justify-content: center;
         width: 18px;
         height: 18px;
         color: #607d8b;
         font-size: 16px;
-        visibility: hidden;
     }
-    .forecast-table .selected-marker-icon.active {
-        visibility: visible;
+    .forecast-table .forecast-selected-row .row-edit-icon {
+        display: inline-flex;
+    }
+    .forecast-table .forecast-selected-row .row-state-icon {
+        display: none;
     }
     </style>
     """
@@ -1188,11 +1325,17 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
         end_date = str(rule_state["end_date"])
         installments_total = str(rule_state["installments_total"])
         active = bool(rule_state["active"])
+        creating_new = bool(rule_state["creating_new"])
 
         with ui.card().classes("w-full"):
             with ui.row().classes("w-full items-center justify-between gap-3").style("margin-top: -10px;"):
+                title_text = (
+                    "Modifica regola"
+                    if selected_rule_id is not None
+                    else "Nuova regola"
+                )
                 ui.label(
-                    "Modifica regola" if selected_rule_id is not None else "Nuova regola"
+                    title_text
                 ).style("font-size: 18px; font-weight: 600")
                 if selected_rule_id is None:
                     add_tooltip(
@@ -1210,7 +1353,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         ),
                         "Attiva o disattiva manualmente questa regola senza cancellarla.",
                     )
-            if selected_rule_id is None:
+            if selected_rule_id is None and not creating_new:
                 return
 
             with ui.column().classes("w-full gap-1"):
@@ -1250,8 +1393,14 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         options={"monthly": "Mensile", "yearly": "Annuale"},
                         value=frequency,
                         label="Frequenza",
-                        on_change=lambda event: rule_state.__setitem__(
-                            "frequency", event.value
+                        on_change=lambda event: (
+                            rule_state.__setitem__("frequency", event.value),
+                            sync_rule_schedule_fields(
+                                "installments_total"
+                                if str(rule_state["installments_total"] or "").strip()
+                                else "end_date"
+                            ),
+                            refresh_rule_editor(),
                         ),
                     ),
                     "Scegli se la regola si ripete ogni mese o una volta l'anno.",
@@ -1293,45 +1442,65 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         label="Fornitore",
                         with_input=True,
                         new_value_mode="add-unique",
-                        options=get_provider_options(),
-                        value=supplier,
+                        options=[""] + get_provider_options(),
+                        value=supplier or None,
                         on_change=lambda event: rule_state.__setitem__(
-                            "provider", event.value
+                            "provider", event.value or ""
                         ),
                     ),
-                    "Campo facoltativo per banca, finanziaria o altro fornitore collegato alla regola.",
+                    "Campo facoltativo per banca, finanziaria o altro fornitore collegato alla regola; puoi anche scrivere un nuovo valore.",
                 ).classes("w-full")
                 add_tooltip(
                     ui.input(
                         label="Data inizio",
-                        value=start_date,
-                        on_change=lambda event: rule_state.__setitem__(
-                            "start_date", event.value
+                        value=format_html_date(start_date),
+                        on_change=lambda event: (
+                            rule_state.__setitem__(
+                                "start_date",
+                                format_ui_date(event.value) if event.value else "",
+                            ),
+                            sync_rule_schedule_fields("start_date"),
+                            refresh_rule_editor(),
                         ),
-                    ),
-                    "Data da cui la regola inizia a produrre movimenti, formato DD-MM-YYYY.",
+                    ).props('type="date"'),
+                    "Data da cui la regola inizia a produrre movimenti.",
                 ).classes("w-full")
+
                 add_tooltip(
                     ui.input(
                         label="Data fine",
-                        value=end_date,
-                        on_change=lambda event: rule_state.__setitem__(
-                            "end_date", event.value
+                        value=format_html_date(end_date),
+                        on_change=lambda event: (
+                            rule_state.__setitem__(
+                                "end_date",
+                                format_ui_date(event.value) if event.value else "",
+                            ),
+                            sync_rule_schedule_fields("end_date"),
+                            refresh_rule_editor(),
                         ),
-                    ),
+                    ).props('type="date"'),
                     "Data oltre la quale la regola e considerata scaduta; svuota il campo per riattivarla nel tempo.",
                 ).classes("w-full")
                 add_tooltip(
                     ui.input(
                         label="Numero rate",
                         value=installments_total,
-                        on_change=lambda event: rule_state.__setitem__(
-                            "installments_total", event.value
+                        on_change=lambda event: (
+                            rule_state.__setitem__("installments_total", event.value),
+                            sync_rule_schedule_fields("installments_total"),
+                            refresh_rule_editor(),
                         ),
                     ),
                     "Numero totale rate, se la regola rappresenta un pagamento rateale.",
                 ).classes("w-full")
                 with ui.row().classes("w-full justify-end gap-2 pt-0"):
+                    if selected_rule_id is not None:
+                        add_tooltip(
+                            ui.button(icon="delete", on_click=delete_selected_rule).props(
+                                "round flat"
+                            ),
+                            "Elimina completamente la regola selezionata.",
+                        )
                     add_tooltip(
                         ui.button(icon="close", on_click=clear_rule_selection).props(
                             "round flat"
@@ -1383,9 +1552,10 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         "id": index,
                         "selection_key": f"{event.source_rule_id or 'settlement'}|{event.original_event_date.isoformat()}|{index}",
                         "is_selected": False,
-                        "row_bg": month_background(event.event_date.month),
+                        "row_bg": movement_status_background(balance_status),
                         "selected_bg": month_selected_background(event.event_date.month),
                         "selected_border": "#2f241f",
+                        "month_accent": month_accent_color(event.event_date.month),
                         "month_break": previous_month_key is not None
                         and month_key != previous_month_key,
                         "date": format_ui_date(event.event_date),
@@ -1423,6 +1593,9 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         "balance": format_currency(running_balance),
                         "status": balance_status,
                         "related_descriptions": list(getattr(event, "related_descriptions", []) or []),
+                        "is_calculated_card": event.description.strip().lower()
+                        == "carta di credito calcolata",
+                        "month_label": format_month_label(event.event_date),
                     }
                 )
                 previous_month_key = month_key
@@ -1435,35 +1608,11 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 None,
             )
 
-            with ui.card().classes("w-full"):
-                if selected_forecast_row is None:
-                    ui.label("Nessun movimento selezionato.").style(
-                        "color: #9a9089; font-size: 13px"
-                    )
-                else:
-                    amount_text = selected_forecast_row["amount"]
-                    clean_amount = amount_text[1:] if amount_text.startswith("-") else amount_text
-                    amount_with_symbol = f"€{clean_amount}"
-                    movement_label = (
-                        "addebito"
-                        if selected_forecast_row["amount_value"] < 0
-                        else "accredito"
-                    )
-                    ui.label(
-                        f"{format_ui_date_long(selected_forecast_row['date'])}, {movement_label} di {amount_with_symbol} per {selected_forecast_row['description']}"
-                    ).style("font-family: 'IBM Plex Mono', monospace; font-size: 11px; font-weight: 600; color: #2f241f")
-                    if selected_forecast_row["description"].strip().lower() == "carta di credito calcolata":
-                        details = selected_forecast_row["related_descriptions"]
-                        if details:
-                            ui.label("Componenti: " + " | ".join(details)).style(
-                                "font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: #6b5b53"
-                            )
-
             table = ui.table(
                 columns=[
                     {
                         "name": "status",
-                        "label": "Stato",
+                        "label": "",
                         "field": "status",
                         "align": "center",
                     },
@@ -1513,15 +1662,30 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
             ):
                 override_state["selected_key"] = ""
             table.add_slot(
+                "top-row",
+                r"""
+                <q-tr v-if="props.rows.length" class="bg-[#f6f1e8]">
+                    <q-td colspan="7" class="text-left text-[11px] font-semibold tracking-[0.08em] text-[#2f241f]" :style="'padding-top: 4px; padding-bottom: 4px; background-color:' + props.rows[0].month_accent">
+                        {{ props.rows[0].month_label }}
+                    </q-td>
+                </q-tr>
+                """,
+            )
+            table.add_slot(
                 "body",
                 r"""
-                <q-tr :props="props" @click="() => $parent.$emit('select_override_row', props.row.selection_key)" :class="props.row.is_selected ? 'cursor-pointer forecast-selected-row' : 'cursor-pointer'" :style="'background-color:' + props.row.row_bg + '; border-top:' + (props.row.month_break ? '4px solid #8f7f73' : '0')">
-                    <q-td key="status" :props="props" class="text-center" :style="'background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
-                        <q-icon v-if="props.row.is_selected" name="edit" color="blue-grey-6" size="sm" />
-                        <q-icon v-else :name="props.row.status" :color="props.row.status === 'dangerous' ? 'negative' : (props.row.status === 'warning' ? 'warning' : 'positive')" size="sm" />
+                <q-tr v-if="props.row.month_break">
+                    <q-td colspan="7" class="text-left text-[11px] font-semibold tracking-[0.08em] text-[#2f241f]" :style="'padding-top: 4px; padding-bottom: 4px; background-color:' + props.row.month_accent">
+                        {{ props.row.month_label }}
                     </q-td>
-                    <q-td key="date" :props="props" :style="'padding-top: 2px; padding-bottom: 2px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">{{ props.row.date }}</q-td>
-                    <q-td key="schedule" :props="props" class="text-center" :style="'background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
+                </q-tr>
+                <q-tr :props="props" @click="() => $parent.$emit('select_override_row', props.row.selection_key)" :class="props.row.is_selected ? 'cursor-pointer forecast-selected-row' : 'cursor-pointer'" :data-selection-key="props.row.selection_key" :style="'background-color:' + props.row.row_bg">
+                    <q-td key="status" :props="props" class="text-center" :style="'padding-top: 1px; padding-bottom: 1px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg) + '; border-left: 8px solid ' + props.row.month_accent">
+                        <q-icon name="edit" color="blue-grey-6" size="sm" class="row-edit-icon" />
+                        <q-icon v-if="props.row.is_calculated_card" name="calculate" color="blue-grey-4" size="sm" class="row-state-icon" />
+                    </q-td>
+                    <q-td key="date" :props="props" :style="'padding-top: 1px; padding-bottom: 1px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">{{ props.row.date }}</q-td>
+                    <q-td key="schedule" :props="props" class="text-center" :style="'padding-top: 1px; padding-bottom: 1px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
                         <q-icon v-if="props.row.is_manual_event" name="add_task" color="teal" size="sm">
                             <q-tooltip>Movimento manuale una tantum</q-tooltip>
                         </q-icon>
@@ -1541,17 +1705,17 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         </template>
                         <q-icon v-else name="radio_button_unchecked" color="grey-5" size="xs" />
                     </q-td>
-                    <q-td key="type" :props="props" class="text-center" :style="'background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
+                    <q-td key="type" :props="props" class="text-center" :style="'padding-top: 1px; padding-bottom: 1px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
                         <q-icon :name="props.row.type" :color="props.row.amount_value < 0 ? 'negative' : 'positive'" size="sm" />
                     </q-td>
-                    <q-td key="description" :props="props" :style="'padding-top: 2px; padding-bottom: 2px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
+                    <q-td key="description" :props="props" :style="'padding-top: 1px; padding-bottom: 1px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
                         <div class="row items-center no-wrap">
                             <q-icon v-if="props.row.carried_overdue" name="history" color="warning" size="xs" class="q-mr-xs" />
                             <span>{{ props.row.description_label }}</span>
                         </div>
                     </q-td>
-                    <q-td key="amount" :props="props" :style="'padding-top: 2px; padding-bottom: 2px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)" :class="props.row.amount_value < 0 ? 'text-[#8a1c1c]' : 'text-[#1f7a1f]'">{{ props.row.amount }}</q-td>
-                    <q-td key="balance" :props="props" :style="'padding-top: 2px; padding-bottom: 2px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)" :class="props.row.balance_value < 0 ? 'text-[#8a1c1c] font-semibold' : 'text-[#2f241f] font-semibold'">{{ props.row.balance }}</q-td>
+                    <q-td key="amount" :props="props" :style="'padding-top: 1px; padding-bottom: 1px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)" :class="props.row.amount_value < 0 ? 'text-[#8a1c1c]' : 'text-[#1f7a1f]'">{{ props.row.amount }}</q-td>
+                    <q-td key="balance" :props="props" :style="'padding-top: 1px; padding-bottom: 1px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)" :class="props.row.balance_value < 0 ? 'text-[#8a1c1c] font-semibold' : 'text-[#2f241f] font-semibold'">{{ props.row.balance }}</q-td>
                 </q-tr>
                 """,
             )

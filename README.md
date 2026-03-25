@@ -20,8 +20,8 @@ The project is no longer just a prototype. It now includes:
 
 The app currently has three main tabs:
 
-- `Movimenti`: one account at a time, with snapshot editing, one-off movement entry, event customization, and movement-by-movement forecast table
-- `Regole`: filtered rules per account, manual create/edit, enable/disable, expired-state handling, and provider suggestions
+- `Movimenti`: one account at a time, with snapshot editing, one-off movement entry, event customization, and a movement-by-movement forecast table with month separators and status-based row colors
+- `Regole`: filtered rules per account, manual create/edit/delete, enable/disable, expired-state handling, and provider suggestions
 - `Impostazioni`: movement options, general settings, Excel import, and account overdraft values
 
 The `Movimenti` tab is currently the main operational view.
@@ -118,6 +118,8 @@ Typical workflow:
 4. Review the projected movement table for the next months
 5. Add one-off movements if needed
 6. Customize single generated events when a rule needs an exception for one specific occurrence
+
+The movement table highlights the selected row for editing, keeps manual movements separate, and shows calculated credit-card settlements as dedicated rows.
 
 A snapshot means: on that exact date, the real account balance has been checked manually and should be trusted as the forecast starting point.
 

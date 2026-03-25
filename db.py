@@ -595,6 +595,15 @@ def set_transaction_rule_active(rule_id: int, active: bool) -> None:
     conn.close()
 
 
+def delete_transaction_rule(rule_id: int) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM forecast_event_overrides WHERE rule_id = ?", (rule_id,))
+    cur.execute("DELETE FROM transaction_rules WHERE id = ?", (rule_id,))
+    conn.commit()
+    conn.close()
+
+
 def update_transaction_rule(
     rule_id: int,
     account_id: int,
