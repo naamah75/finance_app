@@ -20,9 +20,9 @@ The project is no longer just a prototype. It now includes:
 
 The app currently has three main tabs:
 
-- `Movimenti`: one account at a time, with snapshot editing, one-off movement entry, event customization, and a movement-by-movement forecast table with month separators and status-based row colors
-- `Regole`: filtered rules per account, manual create/edit/delete, enable/disable, expired-state handling, and provider suggestions
-- `Impostazioni`: movement options, general settings, Excel import, and account overdraft values
+- `Movimenti`: one account at a time, with snapshot editing, one-off movement entry, event customization, and a movement-by-movement forecast table with month separators, status-based row colors, and a fixed 30-row page
+- `Regole`: filtered rules per account, manual create/edit/delete, enable/disable, expired-state handling, provider suggestions, date pickers, and basic schedule auto-fill
+- `Impostazioni`: a 2x2 grid with movement options, account overdrafts, general settings, and Excel import
 
 The `Movimenti` tab is currently the main operational view.
 

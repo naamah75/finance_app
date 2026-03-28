@@ -102,6 +102,18 @@ def parse_day_value(value: object, frequency: str) -> tuple[int, int | None]:
     return int(day_text), int(month_text)
 
 
+def parse_day_from_start_date(value: object, frequency: str) -> tuple[int, int | None] | None:
+    if value in (None, ""):
+        return None
+    parsed = parse_date_string(value)
+    if not parsed:
+        return None
+    parsed_date = date.fromisoformat(parsed)
+    if frequency == "monthly":
+        return parsed_date.day, None
+    return parsed_date.day, parsed_date.month
+
+
 def normalize_payment_method(value: object) -> str | None:
     if value in (None, ""):
         return None
@@ -144,7 +156,7 @@ def extract_rules(workbook_path: Path) -> list[dict]:
 
             if not description:
                 continue
-            if mapping.get("day") in (None, "") or mapping.get("amount") in (None, ""):
+            if mapping.get("amount") in (None, ""):
                 continue
             if not mapping.get("account"):
                 continue
@@ -153,7 +165,13 @@ def extract_rules(workbook_path: Path) -> list[dict]:
             if account_name not in accounts_by_name:
                 accounts_by_name[account_name] = upsert_account(account_name)
 
-            day_of_month, month_of_year = parse_day_value(mapping["day"], frequency)
+            if mapping.get("day") in (None, ""):
+                fallback_day = parse_day_from_start_date(mapping.get("start_date"), frequency)
+                if fallback_day is None:
+                    continue
+                day_of_month, month_of_year = fallback_day
+            else:
+                day_of_month, month_of_year = parse_day_value(mapping["day"], frequency)
             payment_method = normalize_payment_method(mapping.get("payment_method"))
 
             rules.append(

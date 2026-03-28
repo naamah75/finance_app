@@ -1,4 +1,5 @@
 import tempfile
+import inspect
 from datetime import date, datetime
 from pathlib import Path
 
@@ -292,21 +293,37 @@ def get_rule_status(rule: dict) -> tuple[str, str]:
     return "Disattivata", "#8a1c1c"
 
 
-def get_rule_card_style(is_selected: bool, status_color: str) -> str:
+def get_rule_amount_color(rule: dict) -> str:
+    return "#1f7a1f" if float(rule["amount"]) >= 0 else "#8a1c1c"
+
+
+def get_rule_amount_background(rule: dict) -> str:
+    return "#edf7ed" if float(rule["amount"]) >= 0 else "#f8e7e7"
+
+
+def get_rule_frequency_icon(rule: dict) -> str:
+    return "calendar_month" if rule["frequency"] == "yearly" else "date_range"
+
+
+def get_rule_expiry_icon(rule: dict) -> str:
+    return "event_repeat" if rule["end_date"] else "calendar_today"
+
+
+def get_rule_card_style(rule: dict, is_selected: bool) -> str:
+    amount_color = get_rule_amount_color(rule)
+    background = "#efefef" if not rule["active"] else get_rule_amount_background(rule)
+    if is_rule_expired(rule["end_date"]):
+        background = "#f3efe8"
     base = (
-        f"border-left: 7px solid {status_color}; border-top: 1px solid rgba(47, 36, 31, 0.08); "
+        f"border-left: 7px solid {amount_color}; border-top: 1px solid rgba(47, 36, 31, 0.08); "
         f"border-right: 1px solid rgba(47, 36, 31, 0.08); border-bottom: 1px solid rgba(47, 36, 31, 0.08); padding: 6px 10px; "
     )
     if is_selected:
         return (
             base
-            + "background-color: #f3e7d4 !important; box-shadow: 0 6px 14px rgba(143, 106, 70, 0.12);"
+            + f"background-color: {background} !important; box-shadow: 0 0 0 2px rgba(47, 36, 31, 0.12);"
         )
-    return base + "background-color: #ffffff !important;"
-
-
-def get_rule_frequency_tint(rule: dict) -> str:
-    return "#f4efe2" if rule["frequency"] == "yearly" else "#eef4ea"
+    return base + f"background-color: {background} !important;"
 
 
 def get_provider_options() -> list[str]:
@@ -758,16 +775,39 @@ def save_helper_tooltips_enabled(enabled: bool) -> None:
     )
 
 
-def import_workbook(upload_event) -> None:
-    filename = (upload_event.name or "").strip()
+async def import_workbook(upload_event) -> None:
+    print("[upload-debug] attrs:", sorted(dir(upload_event)))
+    filename = (
+        getattr(upload_event, "name", None)
+        or getattr(upload_event, "filename", None)
+        or getattr(getattr(upload_event, "content", None), "name", None)
+        or getattr(getattr(upload_event, "sender", None), "value", None)
+        or "uploaded.xlsx"
+    )
+    filename = str(filename).strip()
     suffix = Path(filename).suffix.lower()
     if suffix not in {".xlsx", ".xlsm"}:
         ui.notify("Importa un file Excel .xlsx o .xlsm.", color="negative")
         return
 
+    file_obj = (
+        getattr(upload_event, "content", None)
+        or getattr(upload_event, "file", None)
+        or getattr(upload_event, "data", None)
+    )
+    if file_obj is None:
+        ui.notify("Upload non riuscito: file non disponibile nell'evento.", color="negative")
+        return
+
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
         temp_path = Path(temp_file.name)
-        temp_file.write(upload_event.content.read())
+        if hasattr(file_obj, "read"):
+            content = file_obj.read()
+            if inspect.isawaitable(content):
+                content = await content
+            temp_file.write(content)
+        else:
+            temp_file.write(file_obj)
 
     try:
         rules = extract_rules(temp_path)
@@ -1278,29 +1318,34 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     if (rule["payment_method"] or "").lower() == "carta"
                     else "account_balance_wallet"
                 )
+                frequency_icon = get_rule_frequency_icon(rule)
 
                 card = ui.card().classes("w-full cursor-pointer transition-all")
-                card.style(
-                    get_rule_card_style(is_selected, status_color)
-                    + f" background-color: {get_rule_frequency_tint(rule)} !important;"
-                )
+                card.style(get_rule_card_style(rule, is_selected))
                 card.on("click", lambda _, rule_id=rule["id"]: select_rule(int(rule_id)))
                 with card:
                     with ui.row().classes("w-full items-center justify-between gap-3 no-wrap"):
-                        with ui.row().classes("items-center gap-2 min-w-[220px] no-wrap"):
-                            ui.icon(payment_icon).style(
-                                f"font-size: 26px; color: {status_color}; margin-top: 4px; margin-right: 6px"
-                            )
+                        with ui.row().classes("items-center gap-3 min-w-[220px] no-wrap"):
+                            with ui.row().classes("items-center gap-1"):
+                                ui.icon(payment_icon).style(
+                                    "font-size: 22px; color: #607d8b"
+                                )
+                                ui.icon(frequency_icon).style(
+                                    "font-size: 22px; color: #607d8b"
+                                )
+                                ui.icon(
+                                    get_rule_expiry_icon(rule)
+                                ).style("font-size: 22px; color: #607d8b")
                             with ui.column().classes("gap-0"):
                                 ui.label(rule["description"]).style(
                                     f"font-size: 15px; line-height: 1.1; font-weight: 600; color: {'#2f241f' if is_selected else '#4f4540'}"
                                 )
                                 ui.label(
-                                    f"{rule['amount']:.2f} EUR"
-                                ).style("color: #72665f; font-size: 13px; line-height: 1.1; font-weight: 600")
+                                    f"€{abs(float(rule['amount'])):.2f}"
+                                ).style("color: #2f241f; font-size: 13px; line-height: 1.1; font-weight: 600")
                         with ui.column().classes("gap-0 items-end"):
                             ui.label(
-                                f"{format_rule_frequency(rule)} | {format_cadence(rule)}"
+                                format_cadence(rule)
                             ).style("color: #72665f; font-size: 12px; line-height: 1.1")
                             ui.label(supplier).style(
                                 "color: #8b817c; font-size: 11px; line-height: 1.1"
@@ -1650,9 +1695,9 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 ],
                 rows=forecast_rows,
                 row_key="id",
-                pagination=34,
+                pagination=30,
             ).classes("w-full rounded-xl overflow-hidden forecast-table")
-            table.props('table-style="max-height: 990px"')
+            table.props('dense table-style="max-height: 990px"')
             table.style("font-family: 'IBM Plex Mono', monospace; font-size: 11px")
             override_state["rows"] = forecast_rows
             available_rows = [row for row in forecast_rows if row["editable"]]
@@ -1680,12 +1725,12 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     </q-td>
                 </q-tr>
                 <q-tr :props="props" @click="() => $parent.$emit('select_override_row', props.row.selection_key)" :class="props.row.is_selected ? 'cursor-pointer forecast-selected-row' : 'cursor-pointer'" :data-selection-key="props.row.selection_key" :style="'background-color:' + props.row.row_bg">
-                    <q-td key="status" :props="props" class="text-center" :style="'padding-top: 1px; padding-bottom: 1px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg) + '; border-left: 8px solid ' + props.row.month_accent">
+                    <q-td key="status" :props="props" class="text-center" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg) + '; border-left: 8px solid ' + props.row.month_accent">
                         <q-icon name="edit" color="blue-grey-6" size="sm" class="row-edit-icon" />
                         <q-icon v-if="props.row.is_calculated_card" name="calculate" color="blue-grey-4" size="sm" class="row-state-icon" />
                     </q-td>
-                    <q-td key="date" :props="props" :style="'padding-top: 1px; padding-bottom: 1px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">{{ props.row.date }}</q-td>
-                    <q-td key="schedule" :props="props" class="text-center" :style="'padding-top: 1px; padding-bottom: 1px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
+                    <q-td key="date" :props="props" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">{{ props.row.date }}</q-td>
+                    <q-td key="schedule" :props="props" class="text-center" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
                         <q-icon v-if="props.row.is_manual_event" name="add_task" color="teal" size="sm">
                             <q-tooltip>Movimento manuale una tantum</q-tooltip>
                         </q-icon>
@@ -1705,17 +1750,17 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         </template>
                         <q-icon v-else name="radio_button_unchecked" color="grey-5" size="xs" />
                     </q-td>
-                    <q-td key="type" :props="props" class="text-center" :style="'padding-top: 1px; padding-bottom: 1px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
+                    <q-td key="type" :props="props" class="text-center" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
                         <q-icon :name="props.row.type" :color="props.row.amount_value < 0 ? 'negative' : 'positive'" size="sm" />
                     </q-td>
-                    <q-td key="description" :props="props" :style="'padding-top: 1px; padding-bottom: 1px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
+                    <q-td key="description" :props="props" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
                         <div class="row items-center no-wrap">
                             <q-icon v-if="props.row.carried_overdue" name="history" color="warning" size="xs" class="q-mr-xs" />
                             <span>{{ props.row.description_label }}</span>
                         </div>
                     </q-td>
-                    <q-td key="amount" :props="props" :style="'padding-top: 1px; padding-bottom: 1px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)" :class="props.row.amount_value < 0 ? 'text-[#8a1c1c]' : 'text-[#1f7a1f]'">{{ props.row.amount }}</q-td>
-                    <q-td key="balance" :props="props" :style="'padding-top: 1px; padding-bottom: 1px; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)" :class="props.row.balance_value < 0 ? 'text-[#8a1c1c] font-semibold' : 'text-[#2f241f] font-semibold'">{{ props.row.balance }}</q-td>
+                    <q-td key="amount" :props="props" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)" :class="props.row.amount_value < 0 ? 'text-[#8a1c1c]' : 'text-[#1f7a1f]'">{{ props.row.amount }}</q-td>
+                    <q-td key="balance" :props="props" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)" :class="props.row.balance_value < 0 ? 'text-[#8a1c1c] font-semibold' : 'text-[#2f241f] font-semibold'">{{ props.row.balance }}</q-td>
                 </q-tr>
                 """,
             )
@@ -1959,11 +2004,12 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 add_tooltip(
                     ui.input(
                         label="Data aggiornamento",
-                        value=snapshot_state["snapshot_date"],
+                        value=format_html_date(snapshot_state["snapshot_date"]),
                         on_change=lambda event: snapshot_state.__setitem__(
-                            "snapshot_date", event.value
+                            "snapshot_date",
+                            format_ui_date(event.value) if event.value else "",
                         ),
-                    ),
+                    ).props('type="date"'),
                     "Data del saldo reale verificato, nel formato DD-MM-YYYY.",
                 ).classes("min-w-[180px]")
                 add_tooltip(
@@ -1995,58 +2041,78 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
     def render_settings() -> None:
         accounts = get_accounts()
 
-        with ui.column().classes("w-full gap-3"):
-            with ui.card().classes("w-full"):
+        with ui.row().classes("w-full gap-4 items-stretch flex-wrap"):
+            with ui.card().classes("w-full lg:w-[calc(50%-0.5rem)]"):
                 ui.label("Opzioni movimenti").style(
                     "margin-top: -6px; "
                     "font-size: 22px; font-weight: 600"
                 )
-                with ui.row().classes("items-end gap-3"):
-                    forecast_window_input = add_tooltip(
-                        ui.input(
-                            label="Finestra previsione (mesi)",
-                            value=settings_state["forecast_window_months"],
-                        ),
-                        "Numero di mesi mostrati di default nella previsione del conto.",
-                    ).classes("min-w-[220px]")
-                    add_tooltip(
-                        ui.button(
-                            "Salva finestra",
-                            on_click=lambda _: save_forecast_window_months(
-                                forecast_window_input.value
+                with ui.column().classes("gap-3"):
+                    with ui.row().classes("items-end gap-3 flex-wrap"):
+                        forecast_window_input = add_tooltip(
+                            ui.input(
+                                label="Finestra previsione (mesi)",
+                                value=settings_state["forecast_window_months"],
                             ),
-                        ),
-                        "Applica la nuova durata predefinita della previsione.",
-                    )
-
-                with ui.row().classes("items-end gap-3 mt-3"):
-                    warning_margin_input = add_tooltip(
-                        ui.input(
-                            label="Soglia attenzione (€)",
-                            value=settings_state["warning_margin"],
-                        ),
-                        "Margine sopra il fido entro cui la previsione segnala una situazione di attenzione.",
-                    ).classes("min-w-[220px]")
-                    add_tooltip(
-                        ui.button(
-                            "Salva soglia",
-                            on_click=lambda _: save_warning_margin(
-                                warning_margin_input.value
+                            "Numero di mesi mostrati di default nella previsione del conto.",
+                        ).classes("min-w-[220px] flex-1")
+                        add_tooltip(
+                            ui.button(
+                                "Salva finestra",
+                                on_click=lambda _: save_forecast_window_months(
+                                    forecast_window_input.value
+                                ),
                             ),
-                        ),
-                        "Salva la soglia usata per evidenziare i periodi a rischio.",
-                    )
+                            "Applica la nuova durata predefinita della previsione.",
+                        )
+                    with ui.row().classes("items-end gap-3 flex-wrap"):
+                        warning_margin_input = add_tooltip(
+                            ui.input(
+                                label="Soglia attenzione (€)",
+                                value=settings_state["warning_margin"],
+                            ),
+                            "Margine sopra il fido entro cui la previsione segnala una situazione di attenzione.",
+                        ).classes("min-w-[220px] flex-1")
+                        add_tooltip(
+                            ui.button(
+                                "Salva soglia",
+                                on_click=lambda _: save_warning_margin(
+                                    warning_margin_input.value
+                                ),
+                            ),
+                            "Salva la soglia usata per evidenziare i periodi a rischio.",
+                        )
 
-            with ui.card().classes("w-full"):
+            with ui.card().classes("w-full lg:w-[calc(50%-0.5rem)]"):
+                ui.label("Fido conti").style("margin-top: -6px; font-size: 22px; font-weight: 600")
+
+                with ui.column().classes("gap-3"):
+                    for account in accounts:
+                        with ui.row().classes("items-end gap-2 flex-wrap"):
+                            ui.label(account["name"]).classes("min-w-[90px]")
+                            overdraft_input = add_tooltip(
+                                ui.input(
+                                    label="Fido",
+                                    value=str(account["overdraft_limit"] or 0),
+                                ),
+                                f"Imposta il fido disponibile per il conto {account['name']}.",
+                            ).classes("min-w-[160px] flex-1")
+                            add_tooltip(
+                                ui.button(
+                                    "Salva",
+                                    on_click=lambda _, acc_name=account["name"], field=overdraft_input: (
+                                        save_overdraft_limit(acc_name, field.value)
+                                    ),
+                                ),
+                                f"Salva il nuovo fido del conto {account['name']}.",
+                            )
+
+            with ui.card().classes("w-full lg:w-[calc(50%-0.5rem)]"):
                 ui.label("Impostazioni generali").style(
                     "margin-top: -6px; "
                     "font-size: 22px; font-weight: 600"
                 )
-                ui.label("Preferenze dell'interfaccia e del progetto.").style(
-                    "color: #6b5b53"
-                )
-
-                with ui.row().classes("items-center gap-3").style("margin-top: -10px;"):
+                with ui.column().classes("gap-3").style("margin-top: -10px;"):
                     add_tooltip(
                         ui.switch(
                             text="Mostra tooltip guida",
@@ -2058,16 +2124,12 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         "Attiva o disattiva i suggerimenti contestuali sui controlli dell'interfaccia.",
                     )
 
-            with ui.card().classes("w-full"):
+            with ui.card().classes("w-full lg:w-[calc(50%-0.5rem)]"):
                 ui.label("Importazione Excel").style(
                     "margin-top: -6px; "
                     "font-size: 22px; font-weight: 600"
                 )
-                ui.label("Importa regole da un file Excel del piano economico.").style(
-                    "color: #6b5b53"
-                )
-
-                with ui.row().classes("items-center gap-3"):
+                with ui.column().classes("gap-3"):
                     add_tooltip(
                         ui.upload(
                             label="Importa file Excel",
@@ -2076,32 +2138,6 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         ).props('accept=".xlsx,.xlsm"'),
                         "Importa regole da un file Excel .xlsx o .xlsm e aggiorna il database.",
                     ).classes("min-w-[260px]")
-
-            with ui.card().classes("w-full"):
-                ui.label("Fido conti").style("margin-top: -6px; font-size: 22px; font-weight: 600")
-                ui.label("Imposta il fido disponibile per ogni conto.").style(
-                    "color: #6b5b53"
-                )
-
-                for account in accounts:
-                    with ui.row().classes("w-full items-end gap-3"):
-                        ui.label(account["name"]).classes("min-w-[140px]")
-                        overdraft_input = add_tooltip(
-                            ui.input(
-                                label="Fido",
-                                value=str(account["overdraft_limit"] or 0),
-                            ),
-                            f"Imposta il fido disponibile per il conto {account['name']}.",
-                        ).classes("min-w-[180px]")
-                        add_tooltip(
-                            ui.button(
-                                "Salva",
-                                on_click=lambda _, acc_name=account["name"], field=overdraft_input: (
-                                    save_overdraft_limit(acc_name, field.value)
-                                ),
-                            ),
-                            f"Salva il nuovo fido del conto {account['name']}.",
-                        )
 
     with ui.tab_panels(tabs, value=dashboard_tab).classes("w-full"):
         with ui.tab_panel(dashboard_tab).classes("gap-4"):
