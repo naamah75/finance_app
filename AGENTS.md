@@ -110,17 +110,18 @@ Default local URL:
 - `db.py` also stores lightweight UI/application settings in `app_settings`
 - `import_excel.py` is intended to be safe to rerun; for now it replaces imported `transaction_rules` from the latest workbook contents
 - `app.py` already includes a rule management view with filter by account, manual create/edit/delete, manual enable/disable, automatic expired-state detection from `end_date`, provider suggestions, native date pickers, and schedule auto-fill from start/end date or installments
-- `app.py` includes a `Movimenti` view focused on a single active account, with direct snapshot update inputs, a compact forecast table with month separator rows, status-based row colors, and collapsible one-off movement entry
-- The forecast table currently uses month separator rows, month accent bars, selection/edit indicators, compact rows, fixed 30-row pagination, and IBM Plex fonts for readability
+- `app.py` includes a `Movimenti` view focused on a single active account, with direct snapshot update inputs, a compact forecast table with month separator rows, month accent bars, status-based row colors, and collapsible one-off movement entry
+- The forecast table currently uses month separator rows, month accent bars, selection/edit indicators, compact dense rows, fixed 30-row pagination, and IBM Plex fonts for readability
 - `app.py` also includes a one-off manual movement entry form in `Movimenti`
 - The `Movimenti` table includes a `Programma` column that visualizes override/manual-event state via icons and tooltips
-- `app.py` includes an `Impostazioni` view for movement options, general settings, Excel import, and account overdraft values
+- `app.py` includes an `Impostazioni` view arranged as a 2x2 grid for movement options, account overdraft values, general settings, and Excel import
 - Keep manual disable (`active`) separate from automatic expiry; do not overwrite manual intent when a rule becomes expired
 - `forecast.py` is the first draft of the projection engine and expands compact rules into dated forecast events
 - In the current forecast draft, `Conto` rules generate direct account events and `Carta` rules are aggregated into a separate debit on day `10` of the following month
 - `forecast.py` now also merges one-off manual movements and per-event overrides into the final forecast stream
 - The current forecast result also tracks min/max projected balance and account overdraft limits
 - While the Excel workbook is still the source of truth, re-run the import when the workbook changes
+- The UI Excel importer accepts `.xlsx` and `.xlsm` files and can fall back to `start_date` when a row omits the day column
 - The expected future transition is a clean switch: stop maintaining rules in Excel and manage them directly in the app
 
 ## Current priorities

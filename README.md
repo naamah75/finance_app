@@ -20,8 +20,8 @@ The project is no longer just a prototype. It now includes:
 
 The app currently has three main tabs:
 
-- `Movimenti`: one account at a time, with snapshot editing, one-off movement entry, event customization, and a movement-by-movement forecast table with month separators, status-based row colors, and a fixed 30-row page
-- `Regole`: filtered rules per account, manual create/edit/delete, enable/disable, expired-state handling, provider suggestions, date pickers, and basic schedule auto-fill
+- `Movimenti`: one account at a time, with snapshot editing, one-off movement entry, event customization, and a movement-by-movement forecast table with month separators, month accent bars, status-based row colors, compact rows, and a fixed 30-row page
+- `Regole`: filtered rules per account, manual create/edit/delete, enable/disable, expired-state handling, provider suggestions, native date pickers, and schedule auto-fill
 - `Impostazioni`: a 2x2 grid with movement options, account overdrafts, general settings, and Excel import
 
 The `Movimenti` tab is currently the main operational view.
@@ -107,6 +107,8 @@ Note:
 
 - the real workbook is treated as local input data and should not be committed
 - while Excel is still the source of truth, rerun the import whenever the workbook changes
+- the UI importer accepts `.xlsx` and `.xlsm`
+- if a row omits the day column, the importer can fall back to the start date
 
 ## Snapshot and forecast flow
 
@@ -119,7 +121,7 @@ Typical workflow:
 5. Add one-off movements if needed
 6. Customize single generated events when a rule needs an exception for one specific occurrence
 
-The movement table highlights the selected row for editing, keeps manual movements separate, and shows calculated credit-card settlements as dedicated rows.
+The movement table highlights the selected row for editing, keeps manual movements separate, shows calculated credit-card settlements as dedicated rows, and uses compact fixed pagination.
 
 A snapshot means: on that exact date, the real account balance has been checked manually and should be trusted as the forecast starting point.
 
