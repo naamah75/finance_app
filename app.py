@@ -7,11 +7,17 @@ from nicegui import ui
 
 from db import (
     add_transaction_rule,
+    add_app_log,
     add_manual_event,
+    cleanup_cancelled_manual_events,
+    cleanup_closed_overrides,
+    cleanup_obsolete_rules,
+    clear_app_logs,
     delete_transaction_rule,
     delete_forecast_event_override,
     get_account_by_name,
     get_accounts,
+    get_app_logs,
     get_forecast_event_override,
     get_latest_account_snapshot,
     get_setting,
@@ -30,6 +36,9 @@ from db import (
 )
 from forecast import build_account_forecast
 from import_excel import extract_rules
+
+
+APP_VERSION = "0.1.0"
 
 
 def format_balance(balance: float | None) -> str:
@@ -121,6 +130,58 @@ def format_overdraft_limit(value: float | None) -> str:
     if not value:
         return "nessun fido"
     return f"fido € {value:.2f}"
+
+
+def currency_input_style(direction: str) -> str:
+    return f"color: {'#8a1c1c' if direction == 'Uscita' else '#1f7a1f'};"
+
+
+def positive_amount_validation(value: str) -> bool:
+    cleaned = (value or "").replace("€", "").replace(" ", "")
+    if cleaned == "":
+        return True
+    if cleaned.startswith("-"):
+        return False
+    try:
+        numeric = float(cleaned.replace(",", "."))
+    except ValueError:
+        return False
+    return numeric >= 0
+
+
+def normalize_positive_amount_input(value: str) -> str:
+    cleaned = (value or "").replace("€", "").replace("-", "").replace(" ", "")
+    cleaned = cleaned.replace(",", ".")
+    filtered = ""
+    dot_seen = False
+    for char in cleaned:
+        if char.isdigit():
+            filtered += char
+        elif char == "." and not dot_seen:
+            filtered += char
+            dot_seen = True
+    if "." in filtered:
+        head, tail = filtered.split(".", 1)
+        filtered = head + "." + tail[:2]
+    return filtered.replace(".", ",")
+
+
+def log_action(category: str, message: str, details: str | None = None, level: str = "info") -> None:
+    add_app_log(category=category, message=message, details=details, level=level)
+
+
+def get_database_file_info() -> list[dict[str, str]]:
+    file_info: list[dict[str, str]] = []
+    for path in [Path("finance.db")]:
+        if path.exists():
+            file_info.append(
+                {
+                    "name": path.name,
+                    "size": f"{path.stat().st_size / 1024:.1f} KB",
+                    "path": str(path.resolve()),
+                }
+            )
+    return file_info
 
 
 def get_warning_margin() -> float:
@@ -502,6 +563,7 @@ def save_rule_changes() -> None:
             installments_total=installments_total,
             active=active,
         )
+        log_action("db", "Nuova regola aggiunta", description)
         ui.notify("Nuova regola aggiunta.", color="positive")
     else:
         update_transaction_rule(
@@ -519,6 +581,7 @@ def save_rule_changes() -> None:
             installments_total=installments_total,
             active=active,
         )
+        log_action("db", "Regola aggiornata", description)
         ui.notify("Regola aggiornata.", color="positive")
     try_run_default_forecast()
     render_forecast.refresh()
@@ -535,6 +598,7 @@ def delete_selected_rule() -> None:
         return
 
     delete_transaction_rule(int(rule_id))
+    log_action("db", "Regola eliminata", f"rule_id={rule_id}")
     ui.notify("Regola eliminata.", color="positive")
     clear_rule_selection(refresh_editor=False)
     try_run_default_forecast()
@@ -694,6 +758,7 @@ def save_snapshot() -> None:
     upsert_account_snapshot(
         account["id"], snapshot_date_value.isoformat(), balance, note
     )
+    log_action("db", "Snapshot salvato", f"{account_name} {snapshot_date_value.isoformat()} {balance:.2f}")
     ui.notify("Snapshot salvato.", color="positive")
     sync_snapshot_form(account_name)
     refresh_snapshot_views()
@@ -775,6 +840,40 @@ def save_helper_tooltips_enabled(enabled: bool) -> None:
     )
 
 
+def run_cleanup_manual_events() -> None:
+    deleted = cleanup_cancelled_manual_events()
+    log_action("db", "Pulizia movimenti manuali", f"eliminati={deleted}")
+    ui.notify(f"Movimenti manuali rimossi: {deleted}", color="positive")
+    try_run_default_forecast()
+    render_forecast.refresh()
+    render_settings.refresh()
+
+
+def run_cleanup_overrides() -> None:
+    deleted = cleanup_closed_overrides()
+    log_action("db", "Pulizia override chiusi", f"eliminati={deleted}")
+    ui.notify(f"Override rimossi: {deleted}", color="positive")
+    try_run_default_forecast()
+    render_forecast.refresh()
+    render_override_editor.refresh()
+    render_settings.refresh()
+
+
+def run_cleanup_rules() -> None:
+    deleted = cleanup_obsolete_rules()
+    log_action("db", "Pulizia regole obsolete", f"eliminate={deleted}")
+    ui.notify(f"Regole obsolete rimosse: {deleted}", color="positive")
+    refresh_all_rule_views()
+    refresh_rule_editor()
+    render_settings.refresh()
+
+
+def run_clear_logs() -> None:
+    clear_app_logs()
+    add_app_log("app", "Log ripuliti", None)
+    render_settings.refresh()
+
+
 async def import_workbook(upload_event) -> None:
     print("[upload-debug] attrs:", sorted(dir(upload_event)))
     filename = (
@@ -824,6 +923,7 @@ async def import_workbook(upload_event) -> None:
     render_forecast.refresh()
     render_override_editor.refresh()
     render_manual_event_editor.refresh()
+    log_action("db", "Import Excel completato", f"{filename} -> {len(rules)} regole")
     ui.notify(f"Importate {len(rules)} regole da {filename}.", color="positive")
 
 
@@ -872,10 +972,22 @@ def save_manual_event() -> None:
 
     try:
         event_date = parse_ui_date(manual_event_state["event_date"]).isoformat()
-        amount = float(manual_event_state["amount"].replace(",", "."))
+        amount_text = (
+            manual_event_state["amount"]
+            .replace("€", "")
+            .replace(" ", "")
+            .replace(",", ".")
+        )
+        if amount_text.startswith("-"):
+            raise ValueError
+        amount = float(amount_text)
     except ValueError:
         ui.notify("Controlla data e importo del movimento manuale.", color="negative")
         return
+
+    amount = abs(amount)
+    if manual_event_state["direction"] == "Uscita":
+        amount = -amount
 
     description = manual_event_state["description"].strip()
     if not description:
@@ -893,6 +1005,7 @@ def save_manual_event() -> None:
             payment_method=manual_event_state["payment_method"] or None,
             note=manual_event_state["note"].strip() or None,
         )
+        log_action("db", "Movimento manuale aggiunto", description)
         ui.notify("Movimento manuale aggiunto.", color="positive")
     else:
         update_manual_event(
@@ -903,6 +1016,7 @@ def save_manual_event() -> None:
             payment_method=manual_event_state["payment_method"] or None,
             note=manual_event_state["note"].strip() or None,
         )
+        log_action("db", "Movimento manuale aggiornato", description)
         ui.notify("Movimento manuale aggiornato.", color="positive")
 
     manual_event_state["expanded"] = False
@@ -910,6 +1024,10 @@ def save_manual_event() -> None:
     manual_event_state["description"] = ""
     manual_event_state["amount"] = ""
     manual_event_state["note"] = ""
+    forecast_state["selected_key"] = ""
+    ui.run_javascript(
+        "document.querySelectorAll('.forecast-table tr[data-selection-key]').forEach(row => row.classList.remove('forecast-selected-row'))"
+    )
     try_run_default_forecast()
     render_forecast.refresh()
     render_manual_event_editor.refresh()
@@ -922,6 +1040,7 @@ def clear_manual_event_selection(refresh_editor: bool = True) -> None:
     manual_event_state["event_date"] = format_ui_date(date.today())
     manual_event_state["description"] = ""
     manual_event_state["amount"] = ""
+    manual_event_state["direction"] = "Uscita"
     manual_event_state["payment_method"] = "Conto"
     manual_event_state["note"] = ""
     if refresh_editor:
@@ -964,7 +1083,10 @@ def select_forecast_row(value: str | None) -> None:
         manual_event_state["expanded"] = True
         manual_event_state["event_date"] = selected_row["date"]
         manual_event_state["description"] = selected_row["description"]
-        manual_event_state["amount"] = selected_row["amount"]
+        manual_event_state["amount"] = f"{abs(float(selected_row['amount_value'])):.2f}"
+        manual_event_state["direction"] = (
+            "Uscita" if float(selected_row["amount_value"]) < 0 else "Entrata"
+        )
         manual_event_state["payment_method"] = selected_row["payment_method"] or "Conto"
         manual_event_state["note"] = selected_row["note"] or ""
         select_override_event(None, refresh_editor=False)
@@ -990,8 +1112,48 @@ def delete_manual_event() -> None:
         return
 
     set_manual_event_status(selected_event_id, "cancelled")
+    log_action("db", "Movimento manuale annullato", f"event_id={selected_event_id}")
     ui.notify("Movimento manuale annullato.", color="positive")
     clear_manual_event_selection(refresh_editor=False)
+    try_run_default_forecast()
+    render_forecast.refresh()
+    render_manual_event_editor.refresh()
+
+
+def duplicate_manual_event_next_month() -> None:
+    selected_event_id = manual_event_state["selected_event_id"]
+    account = get_account_by_name(dashboard_state["account_name"])
+    if selected_event_id is None or account is None:
+        ui.notify("Seleziona prima un movimento manuale da duplicare.", color="negative")
+        return
+
+    description = manual_event_state["description"].strip()
+    amount_text = str(manual_event_state["amount"] or "").replace("€", "").replace(" ", "")
+    if not description or not amount_text:
+        ui.notify("Compila descrizione e importo prima di duplicare.", color="negative")
+        return
+
+    try:
+        event_date = parse_ui_date(manual_event_state["event_date"])
+        amount = float(amount_text.replace(",", "."))
+    except ValueError:
+        ui.notify("Controlla data e importo del movimento manuale.", color="negative")
+        return
+
+    amount = abs(amount)
+    if manual_event_state["direction"] == "Uscita":
+        amount = -amount
+
+    add_manual_event(
+        account_id=account["id"],
+        event_date=add_months(event_date, 1).isoformat(),
+        description=description,
+        amount=amount,
+        payment_method=manual_event_state["payment_method"] or None,
+        note=manual_event_state["note"].strip() or None,
+    )
+    log_action("db", "Movimento manuale duplicato", description)
+    ui.notify("Movimento duplicato al mese successivo.", color="positive")
     try_run_default_forecast()
     render_forecast.refresh()
     render_manual_event_editor.refresh()
@@ -1003,7 +1165,11 @@ def toggle_manual_event_editor() -> None:
 
 
 def cancel_manual_event_editor() -> None:
+    forecast_state["selected_key"] = ""
     clear_manual_event_selection(refresh_editor=False)
+    ui.run_javascript(
+        "document.querySelectorAll('.forecast-table tr[data-selection-key]').forEach(row => row.classList.remove('forecast-selected-row'))"
+    )
     render_manual_event_editor.refresh()
 
 
@@ -1024,6 +1190,7 @@ def select_override_event(value: str | None, refresh_editor: bool = True) -> Non
         override_state["override_description"] = ""
         override_state["override_event_date"] = ""
         override_state["override_amount"] = ""
+        override_state["direction"] = "Uscita"
         override_state["resolution_mode"] = "auto"
         override_state["status"] = "open"
     elif not selected_row["editable"]:
@@ -1033,6 +1200,7 @@ def select_override_event(value: str | None, refresh_editor: bool = True) -> Non
         override_state["override_description"] = ""
         override_state["override_event_date"] = ""
         override_state["override_amount"] = ""
+        override_state["direction"] = "Uscita"
         override_state["resolution_mode"] = "auto"
         override_state["status"] = "open"
     else:
@@ -1045,9 +1213,12 @@ def select_override_event(value: str | None, refresh_editor: bool = True) -> Non
             selected_row["override_event_date"] or selected_row["date"]
         )
         override_state["override_amount"] = (
-            f"{selected_row['override_amount']:.2f}"
+            f"{abs(float(selected_row['override_amount'])):.2f}"
             if selected_row["override_amount"] is not None
-            else f"{selected_row['amount_value']:.2f}"
+            else f"{abs(float(selected_row['amount_value'])):.2f}"
+        )
+        override_state["direction"] = (
+            "Uscita" if float(selected_row["amount_value"]) < 0 else "Entrata"
         )
         override_state["resolution_mode"] = (
             selected_row["override_resolution_mode"] or "auto"
@@ -1062,6 +1233,14 @@ def save_event_override() -> None:
     account = get_account_by_name(dashboard_state["account_name"])
     rule_id = override_state["rule_id"]
     original_event_date = override_state["original_event_date"]
+    selected_row = next(
+        (
+            row
+            for row in override_state["rows"]
+            if row["selection_key"] == override_state["selected_key"]
+        ),
+        None,
+    )
     if account is None or rule_id is None or not original_event_date:
         ui.notify("Seleziona prima un movimento modificabile.", color="negative")
         return
@@ -1069,6 +1248,7 @@ def save_event_override() -> None:
     override_description = override_state["override_description"].strip()
     override_event_date = override_state["override_event_date"].strip()
     override_amount_text = override_state["override_amount"].strip()
+    direction = override_state["direction"]
     resolution_mode = override_state["resolution_mode"]
     status = override_state["status"]
 
@@ -1079,17 +1259,56 @@ def save_event_override() -> None:
             else None
         )
         parsed_override_amount = (
-            float(override_amount_text.replace(",", "."))
+            float(
+                override_amount_text.replace("€", "").replace(" ", "").replace(",", ".")
+            )
             if override_amount_text
             else None
         )
+        if override_amount_text.startswith("-"):
+            raise ValueError
     except ValueError:
         ui.notify("Controlla data e importo override.", color="negative")
         return
 
+    if parsed_override_amount is not None:
+        parsed_override_amount = abs(parsed_override_amount)
+        if direction == "Uscita":
+            parsed_override_amount = -parsed_override_amount
+
     if status == "open" and parsed_override_date is None:
         ui.notify("Per un override aperto serve una data prevista.", color="negative")
         return
+
+    latest_snapshot = get_latest_account_snapshot(account["id"])
+    if (
+        latest_snapshot
+        and parsed_override_date is not None
+        and date.fromisoformat(parsed_override_date)
+        < date.fromisoformat(latest_snapshot["snapshot_date"])
+        and resolution_mode == "auto"
+    ):
+        resolution_mode = "manual"
+        override_state["resolution_mode"] = "manual"
+        ui.notify(
+            "La nuova data e precedente alla riconciliazione: l'override passa in modalita Manuale.",
+            color="warning",
+        )
+
+    if selected_row is not None:
+        original_description = selected_row["original_description"] or ""
+        original_date = selected_row["original_event_date"]
+        original_amount = round(float(selected_row["original_amount"]), 2)
+
+        if override_description == original_description:
+            override_description = ""
+        if parsed_override_date == original_date:
+            parsed_override_date = None
+        if (
+            parsed_override_amount is not None
+            and round(float(parsed_override_amount), 2) == original_amount
+        ):
+            parsed_override_amount = None
 
     upsert_forecast_event_override(
         rule_id=rule_id,
@@ -1101,6 +1320,7 @@ def save_event_override() -> None:
         resolution_mode=resolution_mode,
         status=status,
     )
+    log_action("db", "Override salvato", f"rule_id={rule_id} event={original_event_date}")
     ui.notify("Override salvato.", color="positive")
     try_run_default_forecast()
     render_forecast.refresh()
@@ -1116,6 +1336,7 @@ def clear_event_override() -> None:
         return
 
     delete_forecast_event_override(rule_id, account["id"], original_event_date)
+    log_action("db", "Override ripristinato", f"rule_id={rule_id} event={original_event_date}")
     ui.notify("Override rimosso.", color="positive")
     try_run_default_forecast()
     render_forecast.refresh()
@@ -1165,6 +1386,7 @@ settings_state = {
     "forecast_window_months": str(get_forecast_window_months()),
     "warning_margin": str(int(get_warning_margin())),
     "helper_tooltips_enabled": get_helper_tooltips_enabled(),
+    "log_category": "all",
 }
 manual_event_state = {
     "selected_event_id": None,
@@ -1173,6 +1395,7 @@ manual_event_state = {
     "event_date": format_ui_date(date.today()),
     "description": "",
     "amount": "",
+    "direction": "Uscita",
     "payment_method": "Conto",
     "note": "",
 }
@@ -1184,6 +1407,7 @@ override_state = {
     "override_description": "",
     "override_event_date": "",
     "override_amount": "",
+    "direction": "Uscita",
     "resolution_mode": "auto",
     "status": "open",
 }
@@ -1581,9 +1805,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 running_balance += event.amount
                 month_key = event.event_date.strftime("%Y-%m")
                 type_icon = (
-                    "credit_card"
-                    if event.event_type == "card_settlement"
-                    else ("south_west" if event.amount < 0 else "north_east")
+                    "south_west" if event.amount < 0 else "north_east"
                 )
                 floor_value = -result.overdraft_limit
                 balance_status = "check_circle"
@@ -1663,12 +1885,6 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     },
                     {"name": "date", "label": "Data", "field": "date", "align": "left"},
                     {
-                        "name": "schedule",
-                        "label": "Programma",
-                        "field": "override_status",
-                        "align": "center",
-                    },
-                    {
                         "name": "type",
                         "label": "Tipo",
                         "field": "type",
@@ -1710,7 +1926,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 "top-row",
                 r"""
                 <q-tr v-if="props.rows.length" class="bg-[#f6f1e8]">
-                    <q-td colspan="7" class="text-left text-[11px] font-semibold tracking-[0.08em] text-[#2f241f]" :style="'padding-top: 4px; padding-bottom: 4px; background-color:' + props.rows[0].month_accent">
+                    <q-td colspan="6" class="text-left text-[11px] font-semibold tracking-[0.08em] text-[#2f241f]" :style="'padding-top: 4px; padding-bottom: 4px; background-color:' + props.rows[0].month_accent">
                         {{ props.rows[0].month_label }}
                     </q-td>
                 </q-tr>
@@ -1720,36 +1936,35 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 "body",
                 r"""
                 <q-tr v-if="props.row.month_break">
-                    <q-td colspan="7" class="text-left text-[11px] font-semibold tracking-[0.08em] text-[#2f241f]" :style="'padding-top: 4px; padding-bottom: 4px; background-color:' + props.row.month_accent">
+                    <q-td colspan="6" class="text-left text-[11px] font-semibold tracking-[0.08em] text-[#2f241f]" :style="'padding-top: 4px; padding-bottom: 4px; background-color:' + props.row.month_accent">
                         {{ props.row.month_label }}
                     </q-td>
                 </q-tr>
                 <q-tr :props="props" @click="() => $parent.$emit('select_override_row', props.row.selection_key)" :class="props.row.is_selected ? 'cursor-pointer forecast-selected-row' : 'cursor-pointer'" :data-selection-key="props.row.selection_key" :style="'background-color:' + props.row.row_bg">
                     <q-td key="status" :props="props" class="text-center" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg) + '; border-left: 8px solid ' + props.row.month_accent">
-                        <q-icon name="edit" color="blue-grey-6" size="sm" class="row-edit-icon" />
-                        <q-icon v-if="props.row.is_calculated_card" name="calculate" color="blue-grey-4" size="sm" class="row-state-icon" />
+                        <div class="row items-center justify-center no-wrap q-gutter-xs">
+                            <q-icon name="edit" color="blue-grey-6" size="sm" class="row-edit-icon" />
+                            <q-icon v-if="props.row.is_calculated_card" name="calculate" color="blue-grey-4" size="sm" class="row-state-icon" />
+                            <q-icon v-if="props.row.is_manual_event" name="add_task" color="teal" size="xs">
+                                <q-tooltip>Movimento manuale una tantum</q-tooltip>
+                            </q-icon>
+                            <template v-else-if="props.row.has_override">
+                                <q-icon v-if="props.row.override_resolution_mode === 'manual' && props.row.override_status === 'open'" name="push_pin" color="warning" size="xs">
+                                    <q-tooltip>Override manuale aperto. Originale: {{ props.row.original_event_date_label }} | {{ props.row.original_description }} | {{ props.row.original_amount.toFixed(2) }}</q-tooltip>
+                                </q-icon>
+                                <q-icon v-if="props.row.date_changed" name="event_repeat" color="secondary" size="xs">
+                                    <q-tooltip>Data modificata. Originale: {{ props.row.original_event_date_label }}</q-tooltip>
+                                </q-icon>
+                                <q-icon v-if="props.row.amount_changed" name="euro" color="secondary" size="xs">
+                                    <q-tooltip>Importo modificato. Originale: {{ props.row.original_amount.toFixed(2) }}</q-tooltip>
+                                </q-icon>
+                                <q-icon v-if="props.row.description_changed" name="edit_note" color="secondary" size="xs">
+                                    <q-tooltip>Descrizione modificata. Originale: {{ props.row.original_description }}</q-tooltip>
+                                </q-icon>
+                            </template>
+                        </div>
                     </q-td>
                     <q-td key="date" :props="props" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">{{ props.row.date }}</q-td>
-                    <q-td key="schedule" :props="props" class="text-center" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
-                        <q-icon v-if="props.row.is_manual_event" name="add_task" color="teal" size="sm">
-                            <q-tooltip>Movimento manuale una tantum</q-tooltip>
-                        </q-icon>
-                        <template v-else-if="props.row.has_override">
-                            <q-icon v-if="props.row.override_resolution_mode === 'manual' && props.row.override_status === 'open'" name="push_pin" color="warning" size="xs" class="q-mr-xs">
-                                <q-tooltip>Override manuale aperto. Originale: {{ props.row.original_event_date_label }} | {{ props.row.original_description }} | {{ props.row.original_amount.toFixed(2) }}</q-tooltip>
-                            </q-icon>
-                            <q-icon v-if="props.row.date_changed" name="event_repeat" color="secondary" size="xs" class="q-mr-xs">
-                                <q-tooltip>Data modificata. Originale: {{ props.row.original_event_date_label }}</q-tooltip>
-                            </q-icon>
-                            <q-icon v-if="props.row.amount_changed" name="euro" color="secondary" size="xs" class="q-mr-xs">
-                                <q-tooltip>Importo modificato. Originale: {{ props.row.original_amount.toFixed(2) }}</q-tooltip>
-                            </q-icon>
-                            <q-icon v-if="props.row.description_changed" name="edit_note" color="secondary" size="xs">
-                                <q-tooltip>Descrizione modificata. Originale: {{ props.row.original_description }}</q-tooltip>
-                            </q-icon>
-                        </template>
-                        <q-icon v-else name="radio_button_unchecked" color="grey-5" size="xs" />
-                    </q-td>
                     <q-td key="type" :props="props" class="text-center" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
                         <q-icon :name="props.row.type" :color="props.row.amount_value < 0 ? 'negative' : 'positive'" size="sm" />
                     </q-td>
@@ -1801,11 +2016,12 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 add_tooltip(
                     ui.input(
                         label="Data movimento",
-                        value=manual_event_state["event_date"],
+                        value=format_html_date(manual_event_state["event_date"]),
                         on_change=lambda event: manual_event_state.__setitem__(
-                            "event_date", event.value
+                            "event_date",
+                            format_ui_date(event.value) if event.value else "",
                         ),
-                    ),
+                    ).props('type="date"'),
                     "Data del movimento una tantum, nel formato DD-MM-YYYY.",
                 ).classes("w-full")
                 add_tooltip(
@@ -1819,15 +2035,26 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     "Nome breve del movimento manuale che vuoi aggiungere o modificare.",
                 ).classes("w-full")
                 add_tooltip(
+                    ui.select(
+                        options=["Uscita", "Entrata"],
+                        value=manual_event_state["direction"],
+                        on_change=lambda event: manual_event_state.__setitem__(
+                            "direction", event.value
+                        ),
+                    ),
+                    "Specifica se il movimento e un addebito oppure un accredito.",
+                ).classes("w-full")
+                add_tooltip(
                     ui.input(
                         label="Importo",
                         value=manual_event_state["amount"],
+                        prefix="€",
                         on_change=lambda event: manual_event_state.__setitem__(
-                            "amount", event.value
+                            "amount", normalize_positive_amount_input(event.value)
                         ),
                     ),
-                    "Importo del movimento: usa un valore negativo per un'uscita e positivo per un'entrata.",
-                ).classes("w-full")
+                    "Importo del movimento: inserisci solo il valore positivo, senza segno.",
+                ).classes("w-full").style(currency_input_style(manual_event_state["direction"]))
                 add_tooltip(
                     ui.select(
                         options=["Conto", "Carta"],
@@ -1840,6 +2067,13 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 ).classes("w-full")
                 with ui.row().classes("w-full justify-end gap-2 pt-0"):
                     if manual_event_state["selected_event_id"] is not None:
+                        add_tooltip(
+                            ui.button(
+                                icon="content_copy",
+                                on_click=duplicate_manual_event_next_month,
+                            ),
+                            "Duplica questo movimento al mese successivo mantenendo gli stessi dati.",
+                        ).props("round flat")
                         add_tooltip(
                             ui.button(icon="close", on_click=clear_manual_event_selection),
                             "Esci dalla modifica e svuota il form senza cancellare il movimento.",
@@ -1920,23 +2154,36 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 add_tooltip(
                     ui.input(
                         label="Nuova data",
-                        value=override_state["override_event_date"],
+                        value=format_html_date(override_state["override_event_date"]),
                         on_change=lambda event: override_state.__setitem__(
-                            "override_event_date", event.value
+                            "override_event_date",
+                            format_ui_date(event.value) if event.value else "",
+                        ),
+                    ).props('type="date"'),
+                    "Nuova data pianificata per questo solo movimento, nel formato DD-MM-YYYY.",
+                ).classes("w-full")
+                add_tooltip(
+                    ui.select(
+                        options=["Uscita", "Entrata"],
+                        value=override_state["direction"],
+                        label="Direzione",
+                        on_change=lambda event: override_state.__setitem__(
+                            "direction", event.value
                         ),
                     ),
-                    "Nuova data pianificata per questo solo movimento, nel formato DD-MM-YYYY.",
+                    "Specifica se il movimento personalizzato e un addebito oppure un accredito.",
                 ).classes("w-full")
                 add_tooltip(
                     ui.input(
                         label="Nuovo importo",
                         value=override_state["override_amount"],
+                        prefix="€",
                         on_change=lambda event: override_state.__setitem__(
-                            "override_amount", event.value
+                            "override_amount", normalize_positive_amount_input(event.value)
                         ),
                     ),
-                    "Nuovo importo per questa singola occorrenza della regola.",
-                ).classes("w-full")
+                    "Nuovo importo per questa singola occorrenza della regola, senza segno.",
+                ).classes("w-full").style(currency_input_style(override_state["direction"]))
                 add_tooltip(
                     ui.select(
                         options={"auto": "Auto", "manual": "Manuale"},
@@ -2123,6 +2370,19 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         ),
                         "Attiva o disattiva i suggerimenti contestuali sui controlli dell'interfaccia.",
                     )
+                    with ui.row().classes("items-center gap-2 flex-wrap"):
+                        add_tooltip(
+                            ui.button("Pulisci movimenti", on_click=run_cleanup_manual_events),
+                            "Rimuove dal database i movimenti manuali annullati.",
+                        )
+                        add_tooltip(
+                            ui.button("Pulisci override", on_click=run_cleanup_overrides),
+                            "Rimuove gli override chiusi o annullati dal database.",
+                        )
+                        add_tooltip(
+                            ui.button("Pulisci regole", on_click=run_cleanup_rules),
+                            "Rimuove le regole disattivate e gia scadute.",
+                        )
 
             with ui.card().classes("w-full lg:w-[calc(50%-0.5rem)]"):
                 ui.label("Importazione Excel").style(
@@ -2138,6 +2398,43 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         ).props('accept=".xlsx,.xlsm"'),
                         "Importa regole da un file Excel .xlsx o .xlsm e aggiorna il database.",
                     ).classes("min-w-[260px]")
+
+            with ui.card().classes("w-full lg:w-[calc(50%-0.5rem)]"):
+                ui.label("Log").style("margin-top: -6px; font-size: 22px; font-weight: 600")
+                with ui.row().classes("items-end gap-2 flex-wrap"):
+                    add_tooltip(
+                        ui.select(
+                            options={"all": "Tutti", "app": "App", "db": "Database"},
+                            value=settings_state["log_category"],
+                            label="Filtro",
+                            on_change=lambda event: (
+                                settings_state.__setitem__("log_category", event.value),
+                                render_settings.refresh(),
+                            ),
+                        ),
+                        "Filtra i log applicativi o quelli piu tecnici legati al database.",
+                    ).classes("min-w-[180px]")
+                    add_tooltip(
+                        ui.button("Svuota log", on_click=run_clear_logs),
+                        "Cancella lo storico dei log visibili in questo pannello.",
+                    )
+                with ui.scroll_area().classes("w-full h-[220px] pr-2"):
+                    for entry in get_app_logs(150, str(settings_state["log_category"])):
+                        details = f" | {entry['details']}" if entry["details"] else ""
+                        ui.label(
+                            f"{entry['created_at']} [{entry['category']}] {entry['message']}{details}"
+                        ).style("font-family: 'IBM Plex Mono', monospace; font-size: 11px")
+
+            with ui.card().classes("w-full lg:w-[calc(50%-0.5rem)]"):
+                ui.label("Tecnico").style("margin-top: -6px; font-size: 22px; font-weight: 600")
+                ui.label(f"Versione applicazione: {APP_VERSION}").style("color: #2f241f")
+                for file_info in get_database_file_info():
+                    with ui.column().classes("gap-0"):
+                        ui.label(file_info["name"]).style("font-weight: 600")
+                        ui.label(f"Dimensione: {file_info['size']}").style("color: #6b5b53")
+                        ui.label(file_info["path"]).style(
+                            "font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #6b5b53"
+                        )
 
     with ui.tab_panels(tabs, value=dashboard_tab).classes("w-full"):
         with ui.tab_panel(dashboard_tab).classes("gap-4"):

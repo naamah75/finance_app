@@ -126,6 +126,19 @@ def init_db() -> None:
         """
     )
 
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            category TEXT NOT NULL,
+            message TEXT NOT NULL,
+            details TEXT,
+            level TEXT NOT NULL DEFAULT 'info'
+        )
+        """
+    )
+
     cur.execute("PRAGMA table_info(forecast_event_overrides)")
     override_columns = {row[1] for row in cur.fetchall()}
     if "override_description" not in override_columns:
@@ -356,6 +369,95 @@ def set_setting(key: str, value: str) -> None:
     )
     conn.commit()
     conn.close()
+
+
+def add_app_log(
+    category: str,
+    message: str,
+    details: str | None = None,
+    level: str = "info",
+) -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO app_logs(category, message, details, level) VALUES (?, ?, ?, ?)",
+        (category, message, details, level),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_app_logs(limit: int = 200, category: str | None = None) -> list[sqlite3.Row]:
+    conn = get_connection()
+    cur = conn.cursor()
+    if category and category != "all":
+        cur.execute(
+            """
+            SELECT id, created_at, category, message, details, level
+            FROM app_logs
+            WHERE category = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (category, limit),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id, created_at, category, message, details, level
+            FROM app_logs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def clear_app_logs() -> None:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM app_logs")
+    conn.commit()
+    conn.close()
+
+
+def cleanup_cancelled_manual_events() -> int:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM manual_events WHERE status = 'cancelled'")
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def cleanup_closed_overrides() -> int:
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM forecast_event_overrides WHERE status IN ('resolved', 'cancelled')"
+    )
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def cleanup_obsolete_rules(today: str | None = None) -> int:
+    current = today or date.today().isoformat()
+    conn = get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM transaction_rules WHERE active = 0 AND end_date IS NOT NULL AND end_date < ?",
+        (current,),
+    )
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
 
 
 def get_forecast_event_overrides(account_id: int) -> list[sqlite3.Row]:
