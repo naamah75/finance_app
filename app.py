@@ -3,7 +3,7 @@ import inspect
 from datetime import date, datetime
 from pathlib import Path
 
-from nicegui import ui
+from nicegui import app, ui
 
 from db import (
     add_transaction_rule,
@@ -18,6 +18,7 @@ from db import (
     get_account_by_name,
     get_accounts,
     get_app_logs,
+    get_bool_setting,
     get_forecast_event_override,
     get_latest_account_snapshot,
     get_setting,
@@ -39,6 +40,10 @@ from import_excel import extract_rules
 
 
 APP_VERSION = "0.1.0"
+ACCOUNT_LOGO_DIR = Path("account_logos")
+
+ACCOUNT_LOGO_DIR.mkdir(exist_ok=True)
+app.add_static_files("/account_logos", str(ACCOUNT_LOGO_DIR.resolve()))
 
 
 def format_balance(balance: float | None) -> str:
@@ -182,6 +187,74 @@ def get_database_file_info() -> list[dict[str, str]]:
                 }
             )
     return file_info
+
+
+def account_logo_setting_key(account_name: str) -> str:
+    return f"account_logo::{account_name}"
+
+
+def get_account_logo_path(account_name: str) -> Path | None:
+    raw_value = get_setting(account_logo_setting_key(account_name), None)
+    if not raw_value:
+        return None
+    path = Path(raw_value)
+    return path if path.exists() else None
+
+
+def get_account_logo_src(account_name: str) -> str | None:
+    path = get_account_logo_path(account_name)
+    if path is None:
+        return None
+    return f"/account_logos/{path.name}"
+
+
+def render_account_selector_cards(selected_account: str, on_select, min_width: int = 170) -> None:
+    accounts = get_accounts()
+    with ui.row().classes("items-center gap-3 flex-wrap"):
+        for account in accounts:
+            account_name = account["name"]
+            logo_src = get_account_logo_src(account_name)
+            card = ui.card().classes("cursor-pointer").style(
+                f"padding: 8px 12px; min-width: {min_width}px; border: 2px solid #2f241f;"
+                if account_name == selected_account
+                else f"padding: 8px 12px; min-width: {min_width}px; border: 1px solid rgba(47, 36, 31, 0.12);"
+            )
+            card.on("click", lambda _, value=account_name: on_select(value))
+            with card:
+                if logo_src:
+                    with ui.column().classes("items-center gap-1"):
+                        with ui.element("div").style(
+                            "width:150px;height:48px;border:1px dashed #b0a79f;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;"
+                        ):
+                            ui.element("img").props(
+                                f'src="{logo_src}" alt="{account_name}"'
+                            ).style(
+                                "display:block;max-width:140px;max-height:40px;width:auto;height:auto;object-fit:contain;"
+                            )
+                else:
+                    ui.label(account_name).style(
+                        "font-family: 'IBM Plex Mono', monospace; font-size: 24px; text-transform: uppercase; letter-spacing: 0.08em"
+                    )
+
+
+async def upload_account_logo(account_name: str, upload_event) -> None:
+    file_obj = getattr(upload_event, "file", None) or getattr(upload_event, "content", None)
+    if file_obj is None:
+        ui.notify("Upload logo non riuscito.", color="negative")
+        return
+    filename = getattr(file_obj, "name", None) or getattr(upload_event, "name", None) or f"{account_name}.png"
+    suffix = Path(str(filename)).suffix.lower() or ".png"
+    safe_name = account_name.lower().replace(" ", "_")
+    target_path = ACCOUNT_LOGO_DIR / f"{safe_name}{suffix}"
+    content = file_obj.read() if hasattr(file_obj, "read") else file_obj
+    if inspect.isawaitable(content):
+        content = await content
+    target_path.write_bytes(content)
+    set_setting(account_logo_setting_key(account_name), str(target_path))
+    log_action("app", "Logo conto aggiornato", account_name)
+    render_dashboard_header.refresh()
+    render_settings.refresh()
+    ui.notify(f"Logo aggiornato per {account_name}.", color="positive")
 
 
 def get_warning_margin() -> float:
@@ -840,6 +913,32 @@ def save_helper_tooltips_enabled(enabled: bool) -> None:
     )
 
 
+def save_show_calculated_card_settlement(enabled: bool) -> None:
+    set_setting("show_calculated_card_settlement", "1" if enabled else "0")
+    settings_state["show_calculated_card_settlement"] = enabled
+    try_run_default_forecast()
+    render_settings.refresh()
+    render_forecast.refresh()
+    render_override_editor.refresh()
+    ui.notify(
+        "Carta di credito calcolata attivata."
+        if enabled
+        else "Carta di credito calcolata disattivata.",
+        color="positive",
+    )
+
+
+def save_credit_card_keyword(value_text: str) -> None:
+    keyword = value_text.strip() or "Carta di credito"
+    set_setting("credit_card_keyword", keyword)
+    settings_state["credit_card_keyword"] = keyword
+    try_run_default_forecast()
+    render_settings.refresh()
+    render_forecast.refresh()
+    render_override_editor.refresh()
+    ui.notify("Parola chiave Carta di credito aggiornata.", color="positive")
+
+
 def run_cleanup_manual_events() -> None:
     deleted = cleanup_cancelled_manual_events()
     log_action("db", "Pulizia movimenti manuali", f"eliminati={deleted}")
@@ -1386,6 +1485,11 @@ settings_state = {
     "forecast_window_months": str(get_forecast_window_months()),
     "warning_margin": str(int(get_warning_margin())),
     "helper_tooltips_enabled": get_helper_tooltips_enabled(),
+    "show_calculated_card_settlement": get_bool_setting(
+        "show_calculated_card_settlement", True
+    ),
+    "credit_card_keyword": get_setting("credit_card_keyword", "Carta di credito")
+    or "Carta di credito",
     "log_category": "all",
 }
 manual_event_state = {
@@ -2211,6 +2315,12 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     "Stato operativo dell'override selezionato.",
                 ).classes("w-full")
                 with ui.row().classes("w-full justify-end gap-2 pt-0"):
+                    add_tooltip(
+                        ui.button(icon="close", on_click=lambda: select_override_event(None)).props(
+                            "round flat"
+                        ),
+                        "Chiudi la personalizzazione senza salvare modifiche.",
+                    )
                     if selected_editable_row and selected_editable_row["has_override"]:
                         add_tooltip(
                             ui.button(icon="restore_page", on_click=clear_event_override),
@@ -2223,66 +2333,54 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
 
     @ui.refreshable
     def render_dashboard_header() -> None:
-        with ui.card().classes("w-full"):
-            with ui.column().classes("w-full gap-3"):
-                with ui.row().classes("items-center gap-3").style("margin-top: -10px;"):
+        with ui.row().classes("w-full gap-4 items-stretch flex-wrap"):
+            with ui.card().classes("w-full lg:w-[40%]"):
+                    with ui.column().classes("gap-2"):
+                        ui.label("Selezione conto").style("font-size: 18px; font-weight: 600")
+                        render_account_selector_cards(
+                            dashboard_state["account_name"], select_active_account, min_width=140
+                        )
+
+            with ui.card().classes("w-full lg:w-[58%]"):
+                ui.label("Riconciliazione conto").style(
+                    "margin-top: -6px; font-size: 18px; font-weight: 600"
+                )
+                with ui.row().classes("w-full items-end gap-4 flex-wrap"):
                     add_tooltip(
-                        ui.select(
-                        options=[account_row["name"] for account_row in get_accounts()],
-                        value=dashboard_state["account_name"],
-                        on_change=lambda event: select_active_account(event.value),
-                        ),
-                        "Scegli il conto su cui lavorare nella vista Movimenti.",
-                    ).classes("min-w-[240px]").style(
-                        "font-family: 'IBM Plex Mono', monospace; font-size: 28px; text-transform: uppercase; letter-spacing: 0.08em"
-                    )
+                        ui.input(
+                            label="Data aggiornamento",
+                            value=format_html_date(snapshot_state["snapshot_date"]),
+                            on_change=lambda event: snapshot_state.__setitem__(
+                                "snapshot_date",
+                                format_ui_date(event.value) if event.value else "",
+                            ),
+                        ).props('type="date"'),
+                        "Data del saldo reale verificato, nel formato DD-MM-YYYY.",
+                    ).classes("min-w-[180px]")
                     add_tooltip(
-                        ui.button(
-                            icon="refresh",
-                            on_click=lambda: (
-                                try_run_default_forecast(),
-                                render_forecast.refresh(),
+                        ui.input(
+                            label="Saldo",
+                            value=snapshot_state["balance"],
+                            on_change=lambda event: snapshot_state.__setitem__(
+                                "balance", event.value
                             ),
                         ),
-                        "Ricalcola la previsione usando i dati correnti del conto selezionato.",
+                        "Saldo reale del conto alla data indicata; diventa la base della previsione.",
+                    ).classes("min-w-[160px]")
+                    add_tooltip(
+                        ui.input(
+                            label="Nota",
+                            value=snapshot_state["note"],
+                            on_change=lambda event: snapshot_state.__setitem__(
+                                "note", event.value
+                            ),
+                        ),
+                        "Nota facoltativa per ricordare come hai verificato o riconciliato il saldo.",
+                    ).classes("min-w-[160px] flex-1")
+                    add_tooltip(
+                        ui.button(icon="save", on_click=save_snapshot),
+                        "Salva o aggiorna lo snapshot del saldo reale per il conto attivo.",
                     ).props("round flat")
-
-            with ui.row().classes("w-full items-end gap-4"):
-                add_tooltip(
-                    ui.input(
-                        label="Data aggiornamento",
-                        value=format_html_date(snapshot_state["snapshot_date"]),
-                        on_change=lambda event: snapshot_state.__setitem__(
-                            "snapshot_date",
-                            format_ui_date(event.value) if event.value else "",
-                        ),
-                    ).props('type="date"'),
-                    "Data del saldo reale verificato, nel formato DD-MM-YYYY.",
-                ).classes("min-w-[180px]")
-                add_tooltip(
-                    ui.input(
-                        label="Saldo",
-                        value=snapshot_state["balance"],
-                        on_change=lambda event: snapshot_state.__setitem__(
-                            "balance", event.value
-                        ),
-                    ),
-                    "Saldo reale del conto alla data indicata; diventa la base della previsione.",
-                ).classes("min-w-[160px]")
-                add_tooltip(
-                    ui.input(
-                        label="Nota",
-                        value=snapshot_state["note"],
-                        on_change=lambda event: snapshot_state.__setitem__(
-                            "note", event.value
-                        ),
-                    ),
-                    "Nota facoltativa per ricordare come hai verificato o riconciliato il saldo.",
-                ).classes("min-w-[260px]")
-                add_tooltip(
-                    ui.button(icon="save", on_click=save_snapshot),
-                    "Salva o aggiorna lo snapshot del saldo reale per il conto attivo.",
-                ).props("round flat")
 
     @ui.refreshable
     def render_settings() -> None:
@@ -2370,22 +2468,36 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         ),
                         "Attiva o disattiva i suggerimenti contestuali sui controlli dell'interfaccia.",
                     )
-                    with ui.row().classes("items-center gap-2 flex-wrap"):
+                    add_tooltip(
+                        ui.switch(
+                            text="Mostra Carta di credito calcolata",
+                            value=settings_state["show_calculated_card_settlement"],
+                            on_change=lambda event: save_show_calculated_card_settlement(
+                                bool(event.value)
+                            ),
+                        ),
+                        "Attiva o disattiva il calcolo e la visualizzazione della riga Carta di credito calcolata.",
+                    )
+                    with ui.row().classes("items-end gap-3 flex-wrap"):
+                        credit_card_keyword_input = add_tooltip(
+                            ui.input(
+                                label="Parola chiave Carta di credito",
+                                value=settings_state["credit_card_keyword"],
+                            ),
+                            "Testo usato per riconoscere il movimento pianificato della carta di credito nel forecast.",
+                        ).classes("min-w-[240px] flex-1")
                         add_tooltip(
-                            ui.button("Pulisci movimenti", on_click=run_cleanup_manual_events),
-                            "Rimuove dal database i movimenti manuali annullati.",
-                        )
-                        add_tooltip(
-                            ui.button("Pulisci override", on_click=run_cleanup_overrides),
-                            "Rimuove gli override chiusi o annullati dal database.",
-                        )
-                        add_tooltip(
-                            ui.button("Pulisci regole", on_click=run_cleanup_rules),
-                            "Rimuove le regole disattivate e gia scadute.",
+                            ui.button(
+                                "Salva parola chiave",
+                                on_click=lambda: save_credit_card_keyword(
+                                    credit_card_keyword_input.value
+                                ),
+                            ),
+                            "Salva la parola chiave usata per il movimento Carta di credito.",
                         )
 
             with ui.card().classes("w-full lg:w-[calc(50%-0.5rem)]"):
-                ui.label("Importazione Excel").style(
+                ui.label("Importazioni").style(
                     "margin-top: -6px; "
                     "font-size: 22px; font-weight: 600"
                 )
@@ -2398,36 +2510,32 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         ).props('accept=".xlsx,.xlsm"'),
                         "Importa regole da un file Excel .xlsx o .xlsm e aggiorna il database.",
                     ).classes("min-w-[260px]")
+                    for account in accounts:
+                        add_tooltip(
+                            ui.upload(
+                                label=f"Logo {account['name']}",
+                                auto_upload=True,
+                                on_upload=lambda event, name=account["name"]: upload_account_logo(name, event),
+                            ).props('accept=".png,.jpg,.jpeg,.webp,.svg"'),
+                            f"Carica il logo da associare al conto {account['name']}.",
+                        ).classes("min-w-[220px]")
 
             with ui.card().classes("w-full lg:w-[calc(50%-0.5rem)]"):
-                ui.label("Log").style("margin-top: -6px; font-size: 22px; font-weight: 600")
-                with ui.row().classes("items-end gap-2 flex-wrap"):
-                    add_tooltip(
-                        ui.select(
-                            options={"all": "Tutti", "app": "App", "db": "Database"},
-                            value=settings_state["log_category"],
-                            label="Filtro",
-                            on_change=lambda event: (
-                                settings_state.__setitem__("log_category", event.value),
-                                render_settings.refresh(),
-                            ),
-                        ),
-                        "Filtra i log applicativi o quelli piu tecnici legati al database.",
-                    ).classes("min-w-[180px]")
-                    add_tooltip(
-                        ui.button("Svuota log", on_click=run_clear_logs),
-                        "Cancella lo storico dei log visibili in questo pannello.",
-                    )
+                ui.label("Eventi").style("margin-top: -6px; font-size: 22px; font-weight: 600")
                 with ui.scroll_area().classes("w-full h-[220px] pr-2"):
-                    for entry in get_app_logs(150, str(settings_state["log_category"])):
+                    for entry in get_app_logs(150, "all"):
                         details = f" | {entry['details']}" if entry["details"] else ""
                         ui.label(
                             f"{entry['created_at']} [{entry['category']}] {entry['message']}{details}"
-                        ).style("font-family: 'IBM Plex Mono', monospace; font-size: 11px")
+                        ).style("font-family: 'IBM Plex Mono', monospace; font-size: 9px; line-height: 0.9")
+                with ui.row().classes("w-full justify-end"):
+                    add_tooltip(
+                        ui.button("Pulisci log", on_click=run_clear_logs),
+                        "Cancella lo storico dei log visibili in questo pannello.",
+                    )
 
             with ui.card().classes("w-full lg:w-[calc(50%-0.5rem)]"):
-                ui.label("Tecnico").style("margin-top: -6px; font-size: 22px; font-weight: 600")
-                ui.label(f"Versione applicazione: {APP_VERSION}").style("color: #2f241f")
+                ui.label("Banca dati").style("margin-top: -6px; font-size: 22px; font-weight: 600")
                 for file_info in get_database_file_info():
                     with ui.column().classes("gap-0"):
                         ui.label(file_info["name"]).style("font-weight: 600")
@@ -2435,6 +2543,24 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         ui.label(file_info["path"]).style(
                             "font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #6b5b53"
                         )
+                with ui.row().classes("w-full justify-start gap-2 mt-3 flex-wrap"):
+                    add_tooltip(
+                        ui.button("Pulisci movimenti", on_click=run_cleanup_manual_events),
+                        "Rimuove dal database i movimenti manuali annullati.",
+                    )
+                    add_tooltip(
+                        ui.button("Pulisci override", on_click=run_cleanup_overrides),
+                        "Rimuove gli override chiusi o annullati dal database.",
+                    )
+                    add_tooltip(
+                        ui.button("Pulisci regole", on_click=run_cleanup_rules),
+                        "Rimuove le regole disattivate e gia scadute.",
+                    )
+
+            with ui.card().classes("w-full"):
+                ui.label(f"Versione applicazione: {APP_VERSION}").style(
+                    "margin-top: -6px; color: #6b5b53; font-size: 12px"
+                )
 
     with ui.tab_panels(tabs, value=dashboard_tab).classes("w-full"):
         with ui.tab_panel(dashboard_tab).classes("gap-4"):
@@ -2449,21 +2575,16 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
 
         with ui.tab_panel(rules_tab).classes("gap-4"):
             with ui.card().classes("w-full"):
-                with ui.row().classes("items-center gap-3"):
-                    add_tooltip(
-                        ui.select(
-                            options=[account_row["name"] for account_row in get_accounts()],
-                            value=str(rule_state["account_filter"]),
-                            on_change=lambda event: (
-                                rule_state.__setitem__("account_filter", event.value),
-                                render_rule_stats.refresh(event.value),
-                                render_rules.refresh(event.value),
-                                refresh_rule_editor(),
-                            ),
+                with ui.column().classes("gap-2"):
+                    ui.label("Selezione conto").style("font-size: 18px; font-weight: 600")
+                    render_account_selector_cards(
+                        str(rule_state["account_filter"]),
+                        lambda value: (
+                            rule_state.__setitem__("account_filter", value),
+                            render_rule_stats.refresh(value),
+                            render_rules.refresh(value),
+                            refresh_rule_editor(),
                         ),
-                        "Scegli il conto di cui vuoi visualizzare le regole oppure tutte le regole.",
-                    ).classes("min-w-[240px]").style(
-                        "font-family: 'IBM Plex Mono', monospace; font-size: 28px; text-transform: uppercase; letter-spacing: 0.08em"
                     )
 
             render_rule_stats(str(rule_state["account_filter"]))

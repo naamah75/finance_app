@@ -7,6 +7,8 @@ from calendar import monthrange
 
 from db import (
     get_account_by_name,
+    get_bool_setting,
+    get_setting,
     get_forecast_event_overrides,
     get_latest_account_snapshot,
     get_manual_events,
@@ -126,7 +128,8 @@ def _next_settlement_date(event_date: date, settlement_day: int) -> date:
 
 
 def _is_planned_credit_card_rule(event: ForecastEvent) -> bool:
-    return event.description.strip().lower() == "carta di credito"
+    keyword = (get_setting("credit_card_keyword", "Carta di credito") or "Carta di credito").strip().lower()
+    return event.description.strip().lower() == keyword
 
 
 def _format_description_amount(value: float) -> str:
@@ -156,6 +159,15 @@ def _earliest_open_override_date(
 ) -> date | None:
     open_dates = [
         key[1] for key, value in overrides.items() if value["status"] == "open"
+    ]
+    return min(open_dates) if open_dates else None
+
+
+def _earliest_open_manual_event_date(account_id: int) -> date | None:
+    open_dates = [
+        date.fromisoformat(row["event_date"])
+        for row in get_manual_events(account_id)
+        if (row["status"] or "open") == "open"
     ]
     return min(open_dates) if open_dates else None
 
@@ -243,6 +255,7 @@ def build_account_forecast(
 
     overdraft_limit = float(account["overdraft_limit"] or 0)
     account_id = int(account["id"])
+    show_calculated_card = get_bool_setting("show_calculated_card_settlement", True)
 
     rules = [
         dict(row)
@@ -251,11 +264,13 @@ def build_account_forecast(
     ]
     override_map = _build_override_map(account_id)
     earliest_override_date = _earliest_open_override_date(override_map)
-    generation_start = (
-        min(start_date, earliest_override_date)
-        if earliest_override_date
-        else start_date
-    )
+    earliest_manual_event_date = _earliest_open_manual_event_date(account_id)
+    generation_candidates = [start_date]
+    if earliest_override_date:
+        generation_candidates.append(earliest_override_date)
+    if earliest_manual_event_date:
+        generation_candidates.append(earliest_manual_event_date)
+    generation_start = min(generation_candidates)
 
     direct_events: list[ForecastEvent] = []
     card_buckets: dict[date, list[ForecastEvent]] = defaultdict(list)
@@ -293,9 +308,11 @@ def build_account_forecast(
             direct_events.append(event)
 
     settlement_events: list[ForecastEvent] = []
+    settlement_amount_by_date: dict[date, float] = {}
     for settlement_date in sorted(card_buckets.keys()):
         spends = card_buckets.get(settlement_date, [])
         total_amount = sum(event.amount for event in spends)
+        settlement_amount_by_date[settlement_date] = total_amount
         description = "Carta di credito calcolata"
         if len(spends) > 1:
             description = "Carta di credito calcolata"
@@ -319,10 +336,47 @@ def build_account_forecast(
             )
         )
 
+    if not show_calculated_card and settlement_amount_by_date:
+        adjusted_direct_events: list[ForecastEvent] = []
+        for event in direct_events:
+            if _is_planned_credit_card_rule(event) and event.ledger_date in settlement_amount_by_date:
+                hidden_amount = settlement_amount_by_date[event.ledger_date]
+                adjusted_direct_events.append(
+                    ForecastEvent(
+                        event_date=event.event_date,
+                        ledger_date=event.ledger_date,
+                        original_event_date=event.original_event_date,
+                        account_name=event.account_name,
+                        description=f"{event.description} ({_format_description_amount(hidden_amount)})",
+                        original_description=event.original_description,
+                        amount=event.amount,
+                        original_amount=event.original_amount,
+                        event_type=event.event_type,
+                        source_rule_id=event.source_rule_id,
+                        source_manual_event_id=event.source_manual_event_id,
+                        account_id=event.account_id,
+                        payment_method=event.payment_method,
+                        note=event.note,
+                        override_id=event.override_id,
+                        override_status=event.override_status,
+                        override_resolution_mode=event.override_resolution_mode,
+                        override_description=event.override_description,
+                        override_event_date=event.override_event_date,
+                        override_amount=event.override_amount,
+                        carried_overdue=event.carried_overdue,
+                        related_descriptions=event.related_descriptions,
+                        related_count=event.related_count,
+                    )
+                )
+            else:
+                adjusted_direct_events.append(event)
+        direct_events = adjusted_direct_events
+        settlement_events = []
+
     manual_events = [
         dict(row)
         for row in get_manual_events(
-            account_id, start_date.isoformat(), end_date.isoformat()
+            account_id, generation_start.isoformat(), end_date.isoformat()
         )
     ]
     extra_events: list[ForecastEvent] = []
@@ -330,10 +384,11 @@ def build_account_forecast(
         if (manual_event["status"] or "open") != "open":
             continue
         event_date = date.fromisoformat(manual_event["event_date"])
+        carried_overdue = event_date < start_date
         extra_events.append(
             ForecastEvent(
                 event_date=event_date,
-                ledger_date=event_date,
+                ledger_date=start_date if carried_overdue else event_date,
                 original_event_date=event_date,
                 account_name=account_name,
                 description=manual_event["description"],
@@ -346,6 +401,7 @@ def build_account_forecast(
                 account_id=account_id,
                 payment_method=manual_event["payment_method"],
                 note=manual_event["note"],
+                carried_overdue=carried_overdue,
             )
         )
 

@@ -356,6 +356,11 @@ def get_setting(key: str, default: str | None = None) -> str | None:
     return row["value"]
 
 
+def get_bool_setting(key: str, default: bool = True) -> bool:
+    raw_value = (get_setting(key, "1" if default else "0") or "").strip().lower()
+    return raw_value not in {"0", "false", "no", "off"}
+
+
 def set_setting(key: str, value: str) -> None:
     conn = get_connection()
     cur = conn.cursor()
