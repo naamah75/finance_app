@@ -41,9 +41,12 @@ from import_excel import extract_rules
 
 APP_VERSION = "0.1.0"
 ACCOUNT_LOGO_DIR = Path("account_logos")
+ASSET_DIR = Path("assets")
 
 ACCOUNT_LOGO_DIR.mkdir(exist_ok=True)
+ASSET_DIR.mkdir(exist_ok=True)
 app.add_static_files("/account_logos", str(ACCOUNT_LOGO_DIR.resolve()))
+app.add_static_files("/assets", str(ASSET_DIR.resolve()))
 
 
 def format_balance(balance: float | None) -> str:
@@ -224,7 +227,7 @@ def render_account_selector_cards(selected_account: str, on_select, min_width: i
                 if logo_src:
                     with ui.column().classes("items-center gap-1"):
                         with ui.element("div").style(
-                            "width:150px;height:48px;border:1px dashed #b0a79f;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;"
+                            "width:150px;height:48px;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden;border-radius:8px;"
                         ):
                             ui.element("img").props(
                                 f'src="{logo_src}" alt="{account_name}"'
@@ -1530,6 +1533,10 @@ ui.add_head_html(
     '<link rel="preconnect" href="https://fonts.googleapis.com">'
     '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
     '<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">'
+)
+ui.add_head_html(
+    '<link rel="icon" type="image/svg+xml" href="/assets/finance_app_icon_v2.svg">'
+    '<meta name="theme-color" content="#12372a">'
 )
 ui.add_head_html(
     """

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Finance App icon">
+  <defs>
+    <linearGradient id="g" x1="52" y1="184" x2="196" y2="72" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1f7a5c"/>
+      <stop offset="1" stop-color="#12372a"/>
+    </linearGradient>
+  </defs>
+  <path d="M56 188V84" fill="none" stroke="#12372a" stroke-linecap="round" stroke-width="16"/>
+  <path d="M56 188H196" fill="none" stroke="#12372a" stroke-linecap="round" stroke-width="16"/>
+  <path d="M78 162l34-30 28 18 42-50" fill="none" stroke="url(#g)" stroke-linecap="round" stroke-linejoin="round" stroke-width="20"/>
+  <path d="M168 100h30v30" fill="none" stroke="url(#g)" stroke-linecap="round" stroke-linejoin="round" stroke-width="14"/>
+  <circle cx="90" cy="160" r="12" fill="#f0c36a"/>
+</svg>
