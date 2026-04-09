@@ -2,6 +2,8 @@
 
 Simple local-first personal finance app built with Python, NiceGUI, and SQLite.
 
+Current app version: `0.2.0`
+
 ## Current status
 
 The project is no longer just a prototype. It now includes:
@@ -20,7 +22,7 @@ The project is no longer just a prototype. It now includes:
 
 The app currently has three main tabs:
 
-- `Movimenti`: one account at a time, with snapshot editing, one-off movement entry, event customization, and a movement-by-movement forecast table with month separators, month accent bars, status-based row colors, compact rows, and a fixed 30-row page
+- `Movimenti`: one account at a time, with snapshot editing, one-off movement entry, event customization, and a movement-by-movement AG Grid forecast with compact month accents, inline filters for text/date/amount columns, row selection linked to side editors, and a fixed 30-row page
 - `Regole`: filtered rules per account, manual create/edit/delete, enable/disable, expired-state handling, provider suggestions, native date pickers, and schedule auto-fill
 - `Impostazioni`: a 2x2 grid with movement options, account overdrafts, general settings, Excel import, logs, and technical info
 
@@ -121,13 +123,13 @@ Typical workflow:
 5. Add one-off movements if needed
 6. Customize single generated events when a rule needs an exception for one specific occurrence
 
-The movement table highlights the selected row for editing, keeps manual movements separate, shows calculated credit-card settlements as dedicated rows, and uses compact fixed pagination. Manual one-off movements and event overrides now use native date pickers, explicit `Entrata/Uscita` selectors, and positive-only currency inputs.
+The movement grid highlights the selected row for editing, keeps manual movements separate, shows calculated credit-card settlements as dedicated rows, and uses compact fixed pagination. Manual one-off movements and event overrides now use native date pickers, explicit `Entrata/Uscita` selectors, and positive-only currency inputs.
 
 The settings area also includes:
 
 - log viewer for application and database actions
 - cleanup actions for cancelled manual movements, closed overrides, and obsolete rules
-- technical info such as app version and database file size
+- technical info such as app version, auto-derived Git build label, and database file size
 
 A snapshot means: on that exact date, the real account balance has been checked manually and should be trusted as the forecast starting point.
 

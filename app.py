@@ -1,6 +1,9 @@
+import os
+import subprocess
 import tempfile
 import inspect
 from datetime import date, datetime
+from html import escape
 from pathlib import Path
 
 from nicegui import app, ui
@@ -39,9 +42,74 @@ from forecast import build_account_forecast
 from import_excel import extract_rules
 
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 ACCOUNT_LOGO_DIR = Path("account_logos")
 ASSET_DIR = Path("assets")
+FORECAST_GRID_MODE = os.environ.get("FINANCE_APP_FORECAST_GRID", "aggrid").strip().lower()
+
+AGGRID_LOCALE_IT = {
+    "page": "Pagina",
+    "more": "Altro",
+    "to": "a",
+    "of": "di",
+    "next": "Successiva",
+    "last": "Ultima",
+    "first": "Prima",
+    "previous": "Precedente",
+    "loadingOoo": "Caricamento...",
+    "noRowsToShow": "Nessun movimento da mostrare",
+    "searchOoo": "Cerca...",
+    "filterOoo": "Filtra...",
+    "selectAll": "Seleziona tutto",
+    "selectAllSearchResults": "Seleziona risultati ricerca",
+    "addCurrentSelectionToFilter": "Aggiungi selezione al filtro",
+    "blanks": "Vuoti",
+    "noMatches": "Nessuna corrispondenza",
+    "equals": "Uguale",
+    "notEqual": "Diverso",
+    "lessThan": "Minore di",
+    "greaterThan": "Maggiore di",
+    "lessThanOrEqual": "Minore o uguale",
+    "greaterThanOrEqual": "Maggiore o uguale",
+    "before": "Prima di",
+    "after": "Dopo",
+    "contains": "Contiene",
+    "notContains": "Non contiene",
+    "startsWith": "Inizia con",
+    "endsWith": "Finisce con",
+    "blank": "Vuoto",
+    "notBlank": "Non vuoto",
+    "andCondition": "E",
+    "orCondition": "O",
+    "applyFilter": "Applica",
+    "resetFilter": "Reset",
+    "clearFilter": "Pulisci",
+    "cancelFilter": "Annulla",
+}
+
+
+def get_build_label() -> str:
+    try:
+        commit_count = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        short_hash = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if commit_count and short_hash:
+            return f"{commit_count} ({short_hash})"
+    except Exception:
+        pass
+    return "dev"
+
+
+APP_BUILD_LABEL = get_build_label()
 
 ACCOUNT_LOGO_DIR.mkdir(exist_ok=True)
 ASSET_DIR.mkdir(exist_ok=True)
@@ -59,6 +127,175 @@ def format_currency(amount: float | None) -> str:
     if amount is None:
         return "0.00"
     return f"{amount:.2f}"
+
+
+def build_forecast_status_html(row: dict) -> str:
+    icons: list[str] = []
+    if row["is_calculated_card"]:
+        icons.append(
+            '<span class="material-icons text-blue-grey-5"'
+            f'{optional_title_attr("Addebito carta calcolato")}>calculate</span>'
+        )
+    if row["carried_overdue"]:
+        icons.append(
+            '<span class="material-icons text-amber-7"'
+            f'{optional_title_attr("Movimento aperto trascinato oltre la data prevista")}>history</span>'
+        )
+    if row["is_manual_event"]:
+        icons.append(
+            '<span class="material-icons text-teal"'
+            f'{optional_title_attr("Movimento manuale una tantum")}>add_task</span>'
+        )
+    elif row["has_override"]:
+        if (
+            row["override_resolution_mode"] == "manual"
+            and row["override_status"] == "open"
+        ):
+            original_amount = float(row["original_amount"] or 0)
+            icons.append(
+                '<span class="material-icons text-amber-7"'
+                f'{optional_title_attr(f"Override manuale aperto. Originale: {row["original_event_date_label"]} | {str(row["original_description"] or "")} | {original_amount:.2f}")}>push_pin</span>'
+            )
+        if row["date_changed"]:
+            icons.append(
+                '<span class="material-icons text-deep-purple-5"'
+                f'{optional_title_attr(f"Data modificata. Originale: {row["original_event_date_label"]}")}>event_repeat</span>'
+            )
+        if row["amount_changed"]:
+            original_amount = float(row["original_amount"] or 0)
+            icons.append(
+                '<span class="material-icons text-deep-purple-5"'
+                f'{optional_title_attr(f"Importo modificato. Originale: {original_amount:.2f}")}>euro</span>'
+            )
+        if row["description_changed"]:
+            icons.append(
+                '<span class="material-icons text-deep-purple-5"'
+                f'{optional_title_attr(f"Descrizione modificata. Originale: {str(row["original_description"] or "")}")}>edit_note</span>'
+            )
+    if not icons:
+        return ""
+    return f'<div class="forecast-grid-status">{"".join(icons)}</div>'
+
+
+def build_forecast_type_html(row: dict) -> str:
+    icon_name = "south_west" if float(row["amount_value"]) < 0 else "north_east"
+    icon_color = "#8a1c1c" if float(row["amount_value"]) < 0 else "#1f7a1f"
+    return (
+        '<div class="forecast-grid-type">'
+        f'<span class="material-icons" style="color:{icon_color}"{optional_title_attr(str(row["type_label"] or ""))}>{icon_name}</span>'
+        "</div>"
+    )
+
+
+def build_forecast_description_html(row: dict) -> str:
+    return (
+        '<div class="forecast-grid-description">'
+        f"<span>{escape(str(row['description_label']))}</span>"
+        "</div>"
+    )
+
+
+def format_month_short(value: date) -> str:
+    months = ["GEN", "FEB", "MAR", "APR", "MAG", "GIU", "LUG", "AGO", "SET", "OTT", "NOV", "DIC"]
+    return months[value.month - 1]
+
+
+def build_forecast_aggrid_options(rows: list[dict]) -> dict:
+    return {
+        "defaultColDef": {
+            "sortable": True,
+            "filter": True,
+            "resizable": True,
+        },
+        "localeText": AGGRID_LOCALE_IT,
+        "columnDefs": [
+            {
+                "field": "month_short",
+                "headerName": "",
+                "minWidth": 54,
+                "maxWidth": 58,
+                "filter": False,
+                "sortable": False,
+                ":cellStyle": "params => ({ color: params.data.month_accent, fontWeight: 700, letterSpacing: '0.04em' })",
+            },
+            {
+                "field": "status_label",
+                "headerName": "Stato",
+                "minWidth": 92,
+                "maxWidth": 112,
+                "filter": False,
+                "sortable": False,
+                ":cellRenderer": "params => params.data.status_html",
+                "cellStyle": {"display": "flex", "alignItems": "center", "justifyContent": "flex-start"},
+            },
+            {
+                "field": "date_value",
+                "headerName": "Data",
+                "minWidth": 92,
+                "maxWidth": 100,
+                "filter": "agDateColumnFilter",
+                ":valueFormatter": "params => params.data.date",
+                "filterParams": {
+                    "filterOptions": ["equals", "lessThan", "greaterThan"],
+                    "maxNumConditions": 1,
+                    ":comparator": "(filterLocalDateAtMidnight, cellValue) => { if (!cellValue) return -1; const parts = String(cellValue).split('-').map(Number); const cellDate = new Date(parts[0], parts[1] - 1, parts[2]); if (cellDate < filterLocalDateAtMidnight) return -1; if (cellDate > filterLocalDateAtMidnight) return 1; return 0; }",
+                },
+            },
+            {
+                "field": "type_label",
+                "headerName": "Tipo",
+                "minWidth": 62,
+                "maxWidth": 70,
+                "filter": False,
+                "sortable": False,
+                ":cellRenderer": "params => params.data.type_html",
+                "cellStyle": {"display": "flex", "alignItems": "center", "justifyContent": "center"},
+            },
+            {
+                "field": "description_label",
+                "headerName": "Descrizione",
+                "minWidth": 300,
+                "flex": 1,
+                ":cellRenderer": "params => params.data.description_html",
+            },
+            {
+                "field": "amount_value",
+                "headerName": "Importo",
+                "minWidth": 110,
+                "maxWidth": 130,
+                "filter": "agNumberColumnFilter",
+                ":valueFormatter": "params => params.data.amount",
+                "filterParams": {
+                    "filterOptions": ["equals", "lessThan", "greaterThan"],
+                    "maxNumConditions": 1,
+                },
+                ":cellStyle": "params => ({ textAlign: 'right', color: params.data.amount_value < 0 ? '#8a1c1c' : '#1f7a1f' })",
+            },
+            {
+                "field": "balance_value",
+                "headerName": "Saldo",
+                "minWidth": 110,
+                "maxWidth": 130,
+                "filter": "agNumberColumnFilter",
+                ":valueFormatter": "params => params.data.balance",
+                "filterParams": {
+                    "filterOptions": ["equals", "lessThan", "greaterThan"],
+                    "maxNumConditions": 1,
+                },
+                ":cellStyle": "params => ({ textAlign: 'right', color: params.data.balance_value < 0 ? '#8a1c1c' : '#2f241f', fontWeight: 600 })",
+            },
+        ],
+        "rowData": rows,
+        "pagination": True,
+        "paginationPageSize": 30,
+        "suppressCellFocus": True,
+        "animateRows": False,
+        "headerHeight": 36,
+        "rowHeight": 34,
+        "rowSelection": "single",
+        ":getRowId": "params => params.data.selection_key",
+        ":getRowStyle": "params => params.data.is_selected ? { backgroundColor: params.data.selected_bg, borderLeft: '8px solid ' + params.data.month_accent } : { backgroundColor: params.data.row_bg, borderLeft: '8px solid ' + params.data.month_accent }",
+    }
 
 
 def format_ui_date(value: date | str | None) -> str:
@@ -298,18 +535,18 @@ def movement_status_background(status: str) -> str:
 
 def month_accent_color(month: int) -> str:
     palette = {
-        1: "#cf9a86",
-        2: "#c9b27a",
-        3: "#9eb97c",
-        4: "#82b49d",
-        5: "#7eb6b0",
-        6: "#84a7c2",
-        7: "#919dc8",
-        8: "#a393c8",
-        9: "#bc97bf",
-        10: "#c89a84",
-        11: "#bba487",
-        12: "#a8a0b5",
+        1: "#c62828",
+        2: "#ef6c00",
+        3: "#9e9d24",
+        4: "#2e7d32",
+        5: "#00897b",
+        6: "#1565c0",
+        7: "#3949ab",
+        8: "#6a1b9a",
+        9: "#ad1457",
+        10: "#d81b60",
+        11: "#5d4037",
+        12: "#455a64",
     }
     return palette.get(month, "#b7ada2")
 
@@ -400,6 +637,12 @@ def add_tooltip(element, text: str):
     if settings_state["helper_tooltips_enabled"]:
         element.tooltip(text)
     return element
+
+
+def optional_title_attr(text: str) -> str:
+    if not settings_state["helper_tooltips_enabled"]:
+        return ""
+    return f' title="{escape(text)}"'
 
 
 def format_cadence(rule: dict) -> str:
@@ -1127,9 +1370,7 @@ def save_manual_event() -> None:
     manual_event_state["amount"] = ""
     manual_event_state["note"] = ""
     forecast_state["selected_key"] = ""
-    ui.run_javascript(
-        "document.querySelectorAll('.forecast-table tr[data-selection-key]').forEach(row => row.classList.remove('forecast-selected-row'))"
-    )
+    refresh_forecast_selection_ui()
     try_run_default_forecast()
     render_forecast.refresh()
     render_manual_event_editor.refresh()
@@ -1153,15 +1394,43 @@ def get_selected_forecast_key() -> str:
     return str(forecast_state.get("selected_key") or "")
 
 
+def refresh_forecast_selection_ui() -> None:
+    if FORECAST_GRID_MODE == "aggrid":
+        render_forecast.refresh()
+        return
+
+    selected_key = get_selected_forecast_key()
+    ui.run_javascript(
+        f"document.querySelectorAll('.forecast-table tr[data-selection-key]').forEach(row => row.classList.toggle('forecast-selected-row', row.dataset.selectionKey === {selected_key!r}))"
+    )
+
+
+def get_forecast_grid_selection_key(event_args: dict | None) -> str | None:
+    if not isinstance(event_args, dict):
+        return None
+
+    row_id = event_args.get("rowId")
+    if row_id:
+        return str(row_id)
+
+    data = event_args.get("data")
+    if isinstance(data, dict) and data.get("selection_key"):
+        return str(data["selection_key"])
+
+    value = event_args.get("value")
+    if isinstance(value, dict) and value.get("selection_key"):
+        return str(value["selection_key"])
+
+    return None
+
+
 def select_forecast_row(value: str | None) -> None:
     selected_key = value or ""
     if selected_key and selected_key == get_selected_forecast_key():
         forecast_state["selected_key"] = ""
         clear_manual_event_selection(refresh_editor=False)
         select_override_event(None, refresh_editor=False)
-        ui.run_javascript(
-            "document.querySelectorAll('.forecast-table tr[data-selection-key]').forEach(row => row.classList.remove('forecast-selected-row'))"
-        )
+        refresh_forecast_selection_ui()
         render_manual_event_editor.refresh()
         render_override_editor.refresh()
         return
@@ -1200,9 +1469,7 @@ def select_forecast_row(value: str | None) -> None:
         else:
             select_override_event(None, refresh_editor=False)
 
-    ui.run_javascript(
-        f"document.querySelectorAll('.forecast-table tr[data-selection-key]').forEach(row => row.classList.toggle('forecast-selected-row', row.dataset.selectionKey === {selected_key!r}))"
-    )
+    refresh_forecast_selection_ui()
     render_manual_event_editor.refresh()
     render_override_editor.refresh()
 
@@ -1269,9 +1536,7 @@ def toggle_manual_event_editor() -> None:
 def cancel_manual_event_editor() -> None:
     forecast_state["selected_key"] = ""
     clear_manual_event_selection(refresh_editor=False)
-    ui.run_javascript(
-        "document.querySelectorAll('.forecast-table tr[data-selection-key]').forEach(row => row.classList.remove('forecast-selected-row'))"
-    )
+    refresh_forecast_selection_ui()
     render_manual_event_editor.refresh()
 
 
@@ -1571,6 +1836,65 @@ ui.add_head_html(
     }
     .forecast-table .forecast-selected-row .row-state-icon {
         display: none;
+    }
+    .forecast-aggrid {
+        border-radius: 12px;
+        overflow: hidden;
+    }
+    .forecast-aggrid .ag-root-wrapper {
+        border: 1px solid rgba(47, 36, 31, 0.08);
+        border-radius: 12px;
+        background: #fffdf8;
+    }
+    .forecast-aggrid .ag-header {
+        background: #f6f1e8;
+        border-bottom: 1px solid rgba(47, 36, 31, 0.08);
+    }
+    .forecast-aggrid .ag-row {
+        cursor: pointer;
+    }
+    .forecast-aggrid .ag-row:hover .ag-cell {
+        background: #f4ede2 !important;
+    }
+    .forecast-aggrid .ag-row-selected .ag-cell,
+    .forecast-aggrid .ag-row-selected.ag-row-hover .ag-cell {
+        background: #efe2cf !important;
+    }
+    .forecast-aggrid .ag-cell {
+        font-family: 'IBM Plex Mono', monospace;
+        font-size: 11px;
+        line-height: 1;
+        display: flex;
+        align-items: center;
+        border-right: 0;
+    }
+    .forecast-aggrid .ag-row-selected {
+        box-shadow: inset 0 0 0 1px rgba(47, 36, 31, 0.10);
+    }
+    .forecast-aggrid .ag-paging-panel {
+        border-top: 1px solid rgba(47, 36, 31, 0.08);
+        background: #fffdf8;
+    }
+    .forecast-grid-type,
+    .forecast-grid-status,
+    .forecast-grid-description {
+        display: inline-flex;
+        align-items: center;
+    }
+    .forecast-grid-type,
+    .forecast-grid-status {
+        justify-content: center;
+        width: 100%;
+    }
+    .forecast-grid-description {
+        gap: 4px;
+        width: 100%;
+    }
+    .forecast-grid-type .material-icons,
+    .forecast-grid-status .material-icons,
+    .forecast-grid-description .material-icons {
+        font-size: 16px;
+        line-height: 1;
     }
     </style>
     """
@@ -1918,12 +2242,16 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 type_icon = (
                     "south_west" if event.amount < 0 else "north_east"
                 )
+                type_label = "Uscita" if event.amount < 0 else "Entrata"
                 floor_value = -result.overdraft_limit
                 balance_status = "check_circle"
+                balance_status_label = "Stabile"
                 if running_balance < floor_value:
                     balance_status = "dangerous"
+                    balance_status_label = "Critico"
                 elif running_balance < floor_value + get_warning_margin():
                     balance_status = "warning"
+                    balance_status_label = "Attenzione"
 
                 forecast_rows.append(
                     {
@@ -1936,8 +2264,11 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         "month_accent": month_accent_color(event.event_date.month),
                         "month_break": previous_month_key is not None
                         and month_key != previous_month_key,
+                        "month_short": format_month_short(event.event_date),
+                        "date_value": event.event_date.isoformat(),
                         "date": format_ui_date(event.event_date),
                         "type": type_icon,
+                        "type_label": type_label,
                         "description": event.description,
                         "description_label": event.description,
                         "original_description": event.original_description,
@@ -1970,6 +2301,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         "balance_value": round(running_balance, 2),
                         "balance": format_currency(running_balance),
                         "status": balance_status,
+                        "status_label": balance_status_label,
                         "related_descriptions": list(getattr(event, "related_descriptions", []) or []),
                         "is_calculated_card": event.description.strip().lower()
                         == "carta di credito calcolata",
@@ -1980,52 +2312,6 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
 
             for row in forecast_rows:
                 row["is_selected"] = row["selection_key"] == selected_forecast_key
-
-            selected_forecast_row = next(
-                (row for row in forecast_rows if row["is_selected"]),
-                None,
-            )
-
-            table = ui.table(
-                columns=[
-                    {
-                        "name": "status",
-                        "label": "",
-                        "field": "status",
-                        "align": "center",
-                    },
-                    {"name": "date", "label": "Data", "field": "date", "align": "left"},
-                    {
-                        "name": "type",
-                        "label": "Tipo",
-                        "field": "type",
-                        "align": "center",
-                    },
-                    {
-                        "name": "description",
-                        "label": "Descrizione",
-                        "field": "description",
-                        "align": "left",
-                    },
-                    {
-                        "name": "amount",
-                        "label": "Importo",
-                        "field": "amount",
-                        "align": "right",
-                    },
-                    {
-                        "name": "balance",
-                        "label": "Saldo",
-                        "field": "balance",
-                        "align": "right",
-                    },
-                ],
-                rows=forecast_rows,
-                row_key="id",
-                pagination=30,
-            ).classes("w-full rounded-xl overflow-hidden forecast-table")
-            table.props('dense table-style="max-height: 990px"')
-            table.style("font-family: 'IBM Plex Mono', monospace; font-size: 11px")
             override_state["rows"] = forecast_rows
             available_rows = [row for row in forecast_rows if row["editable"]]
             if override_state["selected_key"] and not any(
@@ -2033,64 +2319,130 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 for row in available_rows
             ):
                 override_state["selected_key"] = ""
-            table.add_slot(
-                "top-row",
-                r"""
-                <q-tr v-if="props.rows.length" class="bg-[#f6f1e8]">
-                    <q-td colspan="6" class="text-left text-[11px] font-semibold tracking-[0.08em] text-[#2f241f]" :style="'padding-top: 4px; padding-bottom: 4px; background-color:' + props.rows[0].month_accent">
-                        {{ props.rows[0].month_label }}
-                    </q-td>
-                </q-tr>
-                """,
-            )
-            table.add_slot(
-                "body",
-                r"""
-                <q-tr v-if="props.row.month_break">
-                    <q-td colspan="6" class="text-left text-[11px] font-semibold tracking-[0.08em] text-[#2f241f]" :style="'padding-top: 4px; padding-bottom: 4px; background-color:' + props.row.month_accent">
-                        {{ props.row.month_label }}
-                    </q-td>
-                </q-tr>
-                <q-tr :props="props" @click="() => $parent.$emit('select_override_row', props.row.selection_key)" :class="props.row.is_selected ? 'cursor-pointer forecast-selected-row' : 'cursor-pointer'" :data-selection-key="props.row.selection_key" :style="'background-color:' + props.row.row_bg">
-                    <q-td key="status" :props="props" class="text-center" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg) + '; border-left: 8px solid ' + props.row.month_accent">
-                        <div class="row items-center justify-center no-wrap q-gutter-xs">
-                            <q-icon name="edit" color="blue-grey-6" size="sm" class="row-edit-icon" />
-                            <q-icon v-if="props.row.is_calculated_card" name="calculate" color="blue-grey-4" size="sm" class="row-state-icon" />
-                            <q-icon v-if="props.row.is_manual_event" name="add_task" color="teal" size="xs">
-                                <q-tooltip>Movimento manuale una tantum</q-tooltip>
-                            </q-icon>
-                            <template v-else-if="props.row.has_override">
-                                <q-icon v-if="props.row.override_resolution_mode === 'manual' && props.row.override_status === 'open'" name="push_pin" color="warning" size="xs">
-                                    <q-tooltip>Override manuale aperto. Originale: {{ props.row.original_event_date_label }} | {{ props.row.original_description }} | {{ props.row.original_amount.toFixed(2) }}</q-tooltip>
+            if FORECAST_GRID_MODE == "aggrid":
+                grid_rows = []
+                for row in forecast_rows:
+                    grid_row = dict(row)
+                    grid_row["status_html"] = build_forecast_status_html(row)
+                    grid_row["type_html"] = build_forecast_type_html(row)
+                    grid_row["description_html"] = build_forecast_description_html(row)
+                    grid_rows.append(grid_row)
+                grid = ui.aggrid(
+                    build_forecast_aggrid_options(grid_rows),
+                    theme="quartz",
+                ).classes("w-full forecast-aggrid")
+                grid.style("height: 990px")
+                grid.on(
+                    "rowClicked",
+                    lambda event: select_forecast_row(
+                        get_forecast_grid_selection_key(event.args)
+                    ),
+                )
+                grid.on(
+                    "cellClicked",
+                    lambda event: select_forecast_row(
+                        get_forecast_grid_selection_key(event.args)
+                    ),
+                )
+            else:
+                table = ui.table(
+                    columns=[
+                        {
+                            "name": "status",
+                            "label": "",
+                            "field": "status",
+                            "align": "center",
+                        },
+                        {"name": "date", "label": "Data", "field": "date", "align": "left"},
+                        {
+                            "name": "type",
+                            "label": "Tipo",
+                            "field": "type",
+                            "align": "center",
+                        },
+                        {
+                            "name": "description",
+                            "label": "Descrizione",
+                            "field": "description",
+                            "align": "left",
+                        },
+                        {
+                            "name": "amount",
+                            "label": "Importo",
+                            "field": "amount",
+                            "align": "right",
+                        },
+                        {
+                            "name": "balance",
+                            "label": "Saldo",
+                            "field": "balance",
+                            "align": "right",
+                        },
+                    ],
+                    rows=forecast_rows,
+                    row_key="id",
+                    pagination=30,
+                ).classes("w-full rounded-xl overflow-hidden forecast-table")
+                table.props('dense table-style="max-height: 990px"')
+                table.style("font-family: 'IBM Plex Mono', monospace; font-size: 11px")
+                table.add_slot(
+                    "top-row",
+                    r"""
+                    <q-tr v-if="props.rows.length" class="bg-[#f6f1e8]">
+                        <q-td colspan="6" class="text-left text-[11px] font-semibold tracking-[0.08em] text-[#2f241f]" :style="'padding-top: 4px; padding-bottom: 4px; background-color:' + props.rows[0].month_accent">
+                            {{ props.rows[0].month_label }}
+                        </q-td>
+                    </q-tr>
+                    """,
+                )
+                table.add_slot(
+                    "body",
+                    r"""
+                    <q-tr v-if="props.row.month_break">
+                        <q-td colspan="6" class="text-left text-[11px] font-semibold tracking-[0.08em] text-[#2f241f]" :style="'padding-top: 4px; padding-bottom: 4px; background-color:' + props.row.month_accent">
+                            {{ props.row.month_label }}
+                        </q-td>
+                    </q-tr>
+                    <q-tr :props="props" @click="() => $parent.$emit('select_override_row', props.row.selection_key)" :class="props.row.is_selected ? 'cursor-pointer forecast-selected-row' : 'cursor-pointer'" :data-selection-key="props.row.selection_key" :style="'background-color:' + props.row.row_bg">
+                        <q-td key="status" :props="props" class="text-center" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg) + '; border-left: 8px solid ' + props.row.month_accent">
+                            <div class="row items-center justify-center no-wrap q-gutter-xs">
+                                <q-icon name="edit" color="blue-grey-6" size="sm" class="row-edit-icon" />
+                                <q-icon v-if="props.row.is_calculated_card" name="calculate" color="blue-grey-4" size="sm" class="row-state-icon" />
+                                <q-icon v-if="props.row.is_manual_event" name="add_task" color="teal" size="xs">
+                                    <q-tooltip>Movimento manuale una tantum</q-tooltip>
                                 </q-icon>
-                                <q-icon v-if="props.row.date_changed" name="event_repeat" color="secondary" size="xs">
-                                    <q-tooltip>Data modificata. Originale: {{ props.row.original_event_date_label }}</q-tooltip>
-                                </q-icon>
-                                <q-icon v-if="props.row.amount_changed" name="euro" color="secondary" size="xs">
-                                    <q-tooltip>Importo modificato. Originale: {{ props.row.original_amount.toFixed(2) }}</q-tooltip>
-                                </q-icon>
-                                <q-icon v-if="props.row.description_changed" name="edit_note" color="secondary" size="xs">
-                                    <q-tooltip>Descrizione modificata. Originale: {{ props.row.original_description }}</q-tooltip>
-                                </q-icon>
-                            </template>
-                        </div>
-                    </q-td>
-                    <q-td key="date" :props="props" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">{{ props.row.date }}</q-td>
-                    <q-td key="type" :props="props" class="text-center" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
-                        <q-icon :name="props.row.type" :color="props.row.amount_value < 0 ? 'negative' : 'positive'" size="sm" />
-                    </q-td>
-                    <q-td key="description" :props="props" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
-                        <div class="row items-center no-wrap">
-                            <q-icon v-if="props.row.carried_overdue" name="history" color="warning" size="xs" class="q-mr-xs" />
-                            <span>{{ props.row.description_label }}</span>
-                        </div>
-                    </q-td>
-                    <q-td key="amount" :props="props" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)" :class="props.row.amount_value < 0 ? 'text-[#8a1c1c]' : 'text-[#1f7a1f]'">{{ props.row.amount }}</q-td>
-                    <q-td key="balance" :props="props" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)" :class="props.row.balance_value < 0 ? 'text-[#8a1c1c] font-semibold' : 'text-[#2f241f] font-semibold'">{{ props.row.balance }}</q-td>
-                </q-tr>
-                """,
-            )
-            table.on("select_override_row", lambda event: select_forecast_row(event.args))
+                                <template v-else-if="props.row.has_override">
+                                    <q-icon v-if="props.row.override_resolution_mode === 'manual' && props.row.override_status === 'open'" name="push_pin" color="warning" size="xs">
+                                        <q-tooltip>Override manuale aperto. Originale: {{ props.row.original_event_date_label }} | {{ props.row.original_description }} | {{ props.row.original_amount.toFixed(2) }}</q-tooltip>
+                                    </q-icon>
+                                    <q-icon v-if="props.row.date_changed" name="event_repeat" color="secondary" size="xs">
+                                        <q-tooltip>Data modificata. Originale: {{ props.row.original_event_date_label }}</q-tooltip>
+                                    </q-icon>
+                                    <q-icon v-if="props.row.amount_changed" name="euro" color="secondary" size="xs">
+                                        <q-tooltip>Importo modificato. Originale: {{ props.row.original_amount.toFixed(2) }}</q-tooltip>
+                                    </q-icon>
+                                    <q-icon v-if="props.row.description_changed" name="edit_note" color="secondary" size="xs">
+                                        <q-tooltip>Descrizione modificata. Originale: {{ props.row.original_description }}</q-tooltip>
+                                    </q-icon>
+                                </template>
+                            </div>
+                        </q-td>
+                        <q-td key="date" :props="props" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">{{ props.row.date }}</q-td>
+                        <q-td key="type" :props="props" class="text-center" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
+                            <q-icon :name="props.row.type" :color="props.row.amount_value < 0 ? 'negative' : 'positive'" size="sm" />
+                        </q-td>
+                        <q-td key="description" :props="props" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)">
+                            <div class="row items-center no-wrap">
+                                <q-icon v-if="props.row.carried_overdue" name="history" color="warning" size="xs" class="q-mr-xs" />
+                                <span>{{ props.row.description_label }}</span>
+                            </div>
+                        </q-td>
+                        <q-td key="amount" :props="props" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)" :class="props.row.amount_value < 0 ? 'text-[#8a1c1c]' : 'text-[#1f7a1f]'">{{ props.row.amount }}</q-td>
+                        <q-td key="balance" :props="props" :style="'padding-top: 0px; padding-bottom: 0px; line-height: 1; background-color:' + (props.row.is_selected ? props.row.selected_bg : props.row.row_bg)" :class="props.row.balance_value < 0 ? 'text-[#8a1c1c] font-semibold' : 'text-[#2f241f] font-semibold'">{{ props.row.balance }}</q-td>
+                    </q-tr>
+                    """,
+                )
+                table.on("select_override_row", lambda event: select_forecast_row(event.args))
 
     @ui.refreshable
     def render_manual_event_editor() -> None:
@@ -2389,6 +2741,24 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         "Salva o aggiorna lo snapshot del saldo reale per il conto attivo.",
                     ).props("round flat")
 
+    def render_forecast_legend() -> None:
+        if FORECAST_GRID_MODE != "aggrid":
+            return
+        with ui.card().classes("w-full"):
+            with ui.row().classes("w-full items-center justify-between gap-x-3 gap-y-1 flex-wrap text-[10px] text-[#6b5b53]"):
+                for icon_name, color, label in (
+                    ("calculate", "#607d8b", "Carta calcolata"),
+                    ("history", "#f59e0b", "Spostato oltre la data prevista"),
+                    ("add_task", "#009688", "Movimento manuale"),
+                    ("push_pin", "#f59e0b", "Override manuale aperto"),
+                    ("event_repeat", "#7e57c2", "Data modificata"),
+                    ("euro", "#7e57c2", "Importo modificato"),
+                    ("edit_note", "#7e57c2", "Descrizione modificata"),
+                ):
+                    with ui.row().classes("items-center gap-1 no-wrap"):
+                        ui.icon(icon_name).style(f"color: {color}; font-size: 14px")
+                        ui.label(label).style("font-size: 10px; color: #6b5b53")
+
     @ui.refreshable
     def render_settings() -> None:
         accounts = get_accounts()
@@ -2565,7 +2935,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     )
 
             with ui.card().classes("w-full"):
-                ui.label(f"Versione applicazione: {APP_VERSION}").style(
+                ui.label(f"Versione applicazione: {APP_VERSION} | build {APP_BUILD_LABEL}").style(
                     "margin-top: -6px; color: #6b5b53; font-size: 12px"
                 )
 
@@ -2579,6 +2949,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     with ui.column().classes("w-full sticky top-4 gap-4"):
                         render_manual_event_editor()
                         render_override_editor()
+            render_forecast_legend()
 
         with ui.tab_panel(rules_tab).classes("gap-4"):
             with ui.card().classes("w-full"):
