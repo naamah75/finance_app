@@ -95,6 +95,52 @@ python app.py
 
 Open `http://localhost:8080`.
 
+## Local API
+
+The app also exposes local authenticated endpoints under `/api` so an AI agent or local automation can operate on the same data model without driving the UI.
+
+Authentication:
+
+- header: `X-API-Key: <your-key>`
+- or `Authorization: Bearer <your-key>`
+- configure the key from `Impostazioni -> Accesso API`
+- optional environment override: `FINANCE_APP_API_KEY`
+
+Example PowerShell requests:
+
+```powershell
+$headers = @{ 'X-API-Key' = 'your-local-api-key' }
+Invoke-WebRequest -UseBasicParsing -Headers $headers "http://localhost:8080/api/health"
+Invoke-WebRequest -UseBasicParsing -Headers $headers "http://localhost:8080/api/accounts"
+```
+
+Main endpoints:
+
+- `GET /api/health`
+- `GET /api/accounts`
+- `GET /api/forecast?account_name=Fineco&start_date=2026-04-18&end_date=2026-07-18`
+- `GET /api/manual-events?account_name=Fineco`
+- `POST /api/manual-events`
+- `PATCH /api/manual-events/{event_id}`
+- `DELETE /api/manual-events/{event_id}`
+- `GET /api/overrides?account_name=Fineco`
+- `PUT /api/overrides`
+- `DELETE /api/overrides?account_name=Fineco&rule_id=52&original_event_date=2026-04-10`
+- `GET /api/rules`
+- `POST /api/rules`
+- `PATCH /api/rules/{rule_id}`
+- `DELETE /api/rules/{rule_id}`
+- `GET /api/snapshots`
+- `PUT /api/snapshots`
+- `GET /api/settings`
+- `PATCH /api/settings`
+
+Notes:
+
+- date fields use ISO format: `YYYY-MM-DD`
+- the API is local-first and intentionally small; it reuses the same SQLite and forecast logic used by the UI
+- if no API key is configured, `/api/*` returns `503`
+
 ## Import the workbook
 
 Put the planning workbook in the project folder and run:

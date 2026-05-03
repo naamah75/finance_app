@@ -1,11 +1,14 @@
 import os
+import secrets
 import subprocess
 import tempfile
 import inspect
 from datetime import date, datetime
 from html import escape
 from pathlib import Path
+from typing import Any
 
+from fastapi import Depends, Header, HTTPException
 from nicegui import app, ui
 
 from db import (
@@ -19,6 +22,7 @@ from db import (
     delete_transaction_rule,
     delete_forecast_event_override,
     get_account_by_name,
+    get_account_snapshots,
     get_accounts,
     get_app_logs,
     get_bool_setting,
@@ -40,6 +44,10 @@ from db import (
 )
 from forecast import build_account_forecast
 from import_excel import extract_rules
+
+
+API_HEADER_NAME = "X-API-Key"
+API_KEY_ENV_VAR = "FINANCE_APP_API_KEY"
 
 
 APP_VERSION = "0.2.0"
@@ -110,6 +118,127 @@ def get_build_label() -> str:
 
 
 APP_BUILD_LABEL = get_build_label()
+
+
+def get_api_key() -> str:
+    env_value = (os.environ.get(API_KEY_ENV_VAR) or "").strip()
+    if env_value:
+        return env_value
+    return (get_setting("api_key", "") or "").strip()
+
+
+def is_api_enabled() -> bool:
+    return bool(get_api_key())
+
+
+def require_api_key(
+    x_api_key: str | None = Header(default=None, alias=API_HEADER_NAME),
+    authorization: str | None = Header(default=None),
+) -> None:
+    configured_key = get_api_key()
+    if not configured_key:
+        raise HTTPException(status_code=503, detail="API key non configurata")
+
+    provided_key = (x_api_key or "").strip()
+    if not provided_key and authorization:
+        prefix = "Bearer "
+        if authorization.startswith(prefix):
+            provided_key = authorization[len(prefix) :].strip()
+
+    if provided_key != configured_key:
+        raise HTTPException(status_code=401, detail="API key non valida")
+
+
+def parse_iso_date_value(value: str, field_name: str) -> str:
+    try:
+        return date.fromisoformat(value).isoformat()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{field_name} deve essere nel formato YYYY-MM-DD",
+        ) from exc
+
+
+def parse_optional_iso_date_value(value: str | None, field_name: str) -> str | None:
+    if not value:
+        return None
+    return parse_iso_date_value(value, field_name)
+
+
+def parse_bool_setting_value(value: Any) -> str:
+    return "1" if bool(value) else "0"
+
+
+def require_account(account_name: str):
+    account = get_account_by_name(account_name)
+    if account is None:
+        raise HTTPException(status_code=404, detail=f"Conto sconosciuto: {account_name}")
+    return account
+
+
+def serialize_sqlite_row(row) -> dict[str, Any]:
+    return {key: row[key] for key in row.keys()}
+
+
+def serialize_forecast_event(event) -> dict[str, Any]:
+    return {
+        "event_date": event.event_date.isoformat(),
+        "ledger_date": event.ledger_date.isoformat(),
+        "original_event_date": event.original_event_date.isoformat(),
+        "account_name": event.account_name,
+        "description": event.description,
+        "original_description": event.original_description,
+        "amount": event.amount,
+        "original_amount": event.original_amount,
+        "event_type": event.event_type,
+        "source_rule_id": event.source_rule_id,
+        "source_manual_event_id": event.source_manual_event_id,
+        "account_id": event.account_id,
+        "payment_method": event.payment_method,
+        "note": event.note,
+        "override_id": event.override_id,
+        "override_status": event.override_status,
+        "override_resolution_mode": event.override_resolution_mode,
+        "override_description": event.override_description,
+        "override_event_date": event.override_event_date.isoformat()
+        if event.override_event_date
+        else None,
+        "override_amount": event.override_amount,
+        "carried_overdue": event.carried_overdue,
+        "related_descriptions": list(event.related_descriptions or []),
+        "related_count": event.related_count,
+    }
+
+
+def serialize_forecast_result(result) -> dict[str, Any]:
+    return {
+        "account_name": result.account_name,
+        "start_date": result.start_date.isoformat(),
+        "end_date": result.end_date.isoformat(),
+        "opening_balance": result.opening_balance,
+        "closing_balance": result.closing_balance,
+        "overdraft_limit": result.overdraft_limit,
+        "min_balance": result.min_balance,
+        "min_balance_date": result.min_balance_date.isoformat(),
+        "max_balance": result.max_balance,
+        "max_balance_date": result.max_balance_date.isoformat(),
+        "events": [serialize_forecast_event(event) for event in result.events],
+    }
+
+
+def serialize_settings() -> dict[str, Any]:
+    return {
+        "forecast_window_months": get_forecast_window_months(),
+        "warning_margin": get_warning_margin(),
+        "helper_tooltips_enabled": get_helper_tooltips_enabled(),
+        "show_calculated_card_settlement": get_bool_setting(
+            "show_calculated_card_settlement", True
+        ),
+        "credit_card_keyword": get_setting("credit_card_keyword", "Carta di credito")
+        or "Carta di credito",
+        "api_enabled": is_api_enabled(),
+        "api_key_source": "env" if (os.environ.get(API_KEY_ENV_VAR) or "").strip() else "sqlite",
+    }
 
 ACCOUNT_LOGO_DIR.mkdir(exist_ok=True)
 ASSET_DIR.mkdir(exist_ok=True)
@@ -229,16 +358,18 @@ def build_forecast_aggrid_options(rows: list[dict]) -> dict:
                 "cellStyle": {"display": "flex", "alignItems": "center", "justifyContent": "flex-start"},
             },
             {
-                "field": "date_value",
+                "field": "date",
                 "headerName": "Data",
                 "minWidth": 92,
                 "maxWidth": 100,
                 "filter": "agDateColumnFilter",
-                ":valueFormatter": "params => params.data.date",
+                "cellEditor": "agTextCellEditor",
+                ":editable": "params => !!(params.data.editable || params.data.is_manual_event) && !params.data.is_calculated_card",
+                ":comparator": "(valueA, valueB, nodeA, nodeB) => String(nodeA.data.date_value || '').localeCompare(String(nodeB.data.date_value || ''))",
                 "filterParams": {
                     "filterOptions": ["equals", "lessThan", "greaterThan"],
                     "maxNumConditions": 1,
-                    ":comparator": "(filterLocalDateAtMidnight, cellValue) => { if (!cellValue) return -1; const parts = String(cellValue).split('-').map(Number); const cellDate = new Date(parts[0], parts[1] - 1, parts[2]); if (cellDate < filterLocalDateAtMidnight) return -1; if (cellDate > filterLocalDateAtMidnight) return 1; return 0; }",
+                    ":comparator": "(filterLocalDateAtMidnight, cellValue) => { if (!cellValue) return -1; const parts = String(cellValue).split('-').map(Number); if (parts.length !== 3) return -1; const cellDate = new Date(parts[2], parts[1] - 1, parts[0]); if (cellDate < filterLocalDateAtMidnight) return -1; if (cellDate > filterLocalDateAtMidnight) return 1; return 0; }",
                 },
             },
             {
@@ -256,7 +387,7 @@ def build_forecast_aggrid_options(rows: list[dict]) -> dict:
                 "headerName": "Descrizione",
                 "minWidth": 300,
                 "flex": 1,
-                ":cellRenderer": "params => params.data.description_html",
+                ":editable": "params => !!(params.data.editable || params.data.is_manual_event) && !params.data.is_calculated_card",
             },
             {
                 "field": "amount_value",
@@ -264,6 +395,8 @@ def build_forecast_aggrid_options(rows: list[dict]) -> dict:
                 "minWidth": 110,
                 "maxWidth": 130,
                 "filter": "agNumberColumnFilter",
+                "cellEditor": "agNumberCellEditor",
+                ":editable": "params => !!(params.data.editable || params.data.is_manual_event) && !params.data.is_calculated_card",
                 ":valueFormatter": "params => params.data.amount",
                 "filterParams": {
                     "filterOptions": ["equals", "lessThan", "greaterThan"],
@@ -643,6 +776,288 @@ def optional_title_attr(text: str) -> str:
     if not settings_state["helper_tooltips_enabled"]:
         return ""
     return f' title="{escape(text)}"'
+
+
+@app.get("/api/health", dependencies=[Depends(require_api_key)])
+def api_health() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "app_version": APP_VERSION,
+        "build": APP_BUILD_LABEL,
+    }
+
+
+@app.get("/api/accounts", dependencies=[Depends(require_api_key)])
+def api_get_accounts() -> dict[str, Any]:
+    return {"accounts": [serialize_sqlite_row(row) for row in get_accounts()]}
+
+
+@app.get("/api/forecast", dependencies=[Depends(require_api_key)])
+def api_get_forecast(
+    account_name: str,
+    start_date: str,
+    end_date: str,
+    opening_balance: float | None = None,
+) -> dict[str, Any]:
+    require_account(account_name)
+    try:
+        result = build_account_forecast(
+            account_name=account_name,
+            start_date=date.fromisoformat(parse_iso_date_value(start_date, "start_date")),
+            end_date=date.fromisoformat(parse_iso_date_value(end_date, "end_date")),
+            opening_balance=opening_balance,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return serialize_forecast_result(result)
+
+
+@app.get("/api/manual-events", dependencies=[Depends(require_api_key)])
+def api_get_manual_events(
+    account_name: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict[str, Any]:
+    account = require_account(account_name)
+    rows = get_manual_events(
+        int(account["id"]),
+        parse_optional_iso_date_value(start_date, "start_date"),
+        parse_optional_iso_date_value(end_date, "end_date"),
+    )
+    return {"manual_events": [serialize_sqlite_row(row) for row in rows]}
+
+
+@app.post("/api/manual-events", dependencies=[Depends(require_api_key)])
+def api_create_manual_event(payload: dict[str, Any]) -> dict[str, Any]:
+    account_name = str(payload.get("account_name") or "").strip()
+    description = str(payload.get("description") or "").strip()
+    if not account_name or not description:
+        raise HTTPException(status_code=422, detail="account_name e description sono obbligatori")
+    account = require_account(account_name)
+    event_date = parse_iso_date_value(str(payload.get("event_date") or ""), "event_date")
+    try:
+        amount = float(payload.get("amount"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="amount deve essere numerico") from exc
+
+    add_manual_event(
+        account_id=int(account["id"]),
+        event_date=event_date,
+        description=description,
+        amount=amount,
+        payment_method=(str(payload.get("payment_method") or "").strip() or None),
+        status=(str(payload.get("status") or "open").strip() or "open"),
+        note=(str(payload.get("note") or "").strip() or None),
+    )
+    log_action("api", "Movimento manuale creato via API", description)
+    rows = get_manual_events(int(account["id"]), event_date, event_date)
+    created = next((row for row in reversed(rows) if row["description"] == description and float(row["amount"]) == amount), None)
+    return {"manual_event": serialize_sqlite_row(created) if created else None}
+
+
+@app.patch("/api/manual-events/{event_id}", dependencies=[Depends(require_api_key)])
+def api_update_manual_event(event_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    account_name = str(payload.get("account_name") or "").strip()
+    account = require_account(account_name)
+    rows = get_manual_events(int(account["id"]))
+    existing = next((row for row in rows if int(row["id"]) == event_id), None)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Movimento manuale non trovato: {event_id}")
+
+    event_date = parse_iso_date_value(str(payload.get("event_date") or existing["event_date"]), "event_date")
+    description = str(payload.get("description") or existing["description"]).strip()
+    if not description:
+        raise HTTPException(status_code=422, detail="description non puo essere vuota")
+    try:
+        amount = float(payload.get("amount", existing["amount"]))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="amount deve essere numerico") from exc
+
+    update_manual_event(
+        event_id=event_id,
+        event_date=event_date,
+        description=description,
+        amount=amount,
+        payment_method=(str(payload.get("payment_method") or existing["payment_method"] or "").strip() or None),
+        note=(str(payload.get("note") or existing["note"] or "").strip() or None),
+    )
+    if "status" in payload:
+        set_manual_event_status(event_id, str(payload.get("status") or "open").strip() or "open")
+    log_action("api", "Movimento manuale aggiornato via API", f"event_id={event_id}")
+    updated = next((row for row in get_manual_events(int(account["id"])) if int(row["id"]) == event_id), None)
+    return {"manual_event": serialize_sqlite_row(updated) if updated else None}
+
+
+@app.delete("/api/manual-events/{event_id}", dependencies=[Depends(require_api_key)])
+def api_delete_manual_event(event_id: int) -> dict[str, Any]:
+    set_manual_event_status(event_id, "cancelled")
+    log_action("api", "Movimento manuale annullato via API", f"event_id={event_id}")
+    return {"ok": True}
+
+
+@app.get("/api/overrides", dependencies=[Depends(require_api_key)])
+def api_get_overrides(account_name: str) -> dict[str, Any]:
+    account = require_account(account_name)
+    rows = get_forecast_event_overrides(int(account["id"]))
+    return {"overrides": [serialize_sqlite_row(row) for row in rows]}
+
+
+@app.put("/api/overrides", dependencies=[Depends(require_api_key)])
+def api_put_override(payload: dict[str, Any]) -> dict[str, Any]:
+    account_name = str(payload.get("account_name") or "").strip()
+    account = require_account(account_name)
+    try:
+        rule_id = int(payload.get("rule_id"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="rule_id deve essere un intero") from exc
+    original_event_date = parse_iso_date_value(
+        str(payload.get("original_event_date") or ""),
+        "original_event_date",
+    )
+    upsert_forecast_event_override(
+        rule_id=rule_id,
+        account_id=int(account["id"]),
+        original_event_date=original_event_date,
+        override_description=(str(payload.get("override_description") or "").strip() or None),
+        override_event_date=parse_optional_iso_date_value(payload.get("override_event_date"), "override_event_date"),
+        override_amount=float(payload["override_amount"]) if payload.get("override_amount") is not None else None,
+        resolution_mode=str(payload.get("resolution_mode") or "auto"),
+        status=str(payload.get("status") or "open"),
+    )
+    log_action("api", "Override salvato via API", f"rule_id={rule_id} event={original_event_date}")
+    row = get_forecast_event_override(rule_id, int(account["id"]), original_event_date)
+    return {"override": serialize_sqlite_row(row) if row else None}
+
+
+@app.delete("/api/overrides", dependencies=[Depends(require_api_key)])
+def api_delete_override(account_name: str, rule_id: int, original_event_date: str) -> dict[str, Any]:
+    account = require_account(account_name)
+    original_date = parse_iso_date_value(original_event_date, "original_event_date")
+    delete_forecast_event_override(rule_id, int(account["id"]), original_date)
+    log_action("api", "Override eliminato via API", f"rule_id={rule_id} event={original_date}")
+    return {"ok": True}
+
+
+@app.get("/api/rules", dependencies=[Depends(require_api_key)])
+def api_get_rules(active_only: bool = False) -> dict[str, Any]:
+    return {"rules": [serialize_sqlite_row(row) for row in get_transaction_rules(active_only=active_only)]}
+
+
+@app.post("/api/rules", dependencies=[Depends(require_api_key)])
+def api_create_rule(payload: dict[str, Any]) -> dict[str, Any]:
+    account = require_account(str(payload.get("account_name") or "").strip())
+    description = str(payload.get("description") or "").strip()
+    if not description:
+        raise HTTPException(status_code=422, detail="description e obbligatoria")
+    try:
+        new_id = add_transaction_rule(
+            account_id=int(account["id"]),
+            description=description,
+            amount=float(payload.get("amount")),
+            frequency=str(payload.get("frequency") or "monthly"),
+            day_of_month=int(payload.get("day_of_month")),
+            month_of_year=int(payload["month_of_year"]) if payload.get("month_of_year") is not None else None,
+            payment_method=(str(payload.get("payment_method") or "").strip() or None),
+            provider=(str(payload.get("provider") or "").strip() or None),
+            start_date=parse_optional_iso_date_value(payload.get("start_date"), "start_date"),
+            end_date=parse_optional_iso_date_value(payload.get("end_date"), "end_date"),
+            installments_total=int(payload["installments_total"]) if payload.get("installments_total") is not None else None,
+            active=bool(payload.get("active", True)),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Campi regola non validi") from exc
+    log_action("api", "Regola creata via API", description)
+    created = next((row for row in get_transaction_rules() if int(row["id"]) == new_id), None)
+    return {"rule": serialize_sqlite_row(created) if created else None}
+
+
+@app.patch("/api/rules/{rule_id}", dependencies=[Depends(require_api_key)])
+def api_update_rule(rule_id: int, payload: dict[str, Any]) -> dict[str, Any]:
+    current = next((row for row in get_transaction_rules() if int(row["id"]) == rule_id), None)
+    if current is None:
+        raise HTTPException(status_code=404, detail=f"Regola non trovata: {rule_id}")
+    account_name = str(payload.get("account_name") or current["account_name"]).strip()
+    account = require_account(account_name)
+    try:
+        update_transaction_rule(
+            rule_id=rule_id,
+            account_id=int(account["id"]),
+            description=str(payload.get("description") or current["description"]).strip(),
+            amount=float(payload.get("amount", current["amount"])),
+            frequency=str(payload.get("frequency") or current["frequency"]),
+            day_of_month=int(payload.get("day_of_month", current["day_of_month"])),
+            month_of_year=int(payload["month_of_year"]) if payload.get("month_of_year") is not None else current["month_of_year"],
+            payment_method=(str(payload.get("payment_method") if "payment_method" in payload else current["payment_method"] or "").strip() or None),
+            provider=(str(payload.get("provider") if "provider" in payload else current["provider"] or "").strip() or None),
+            start_date=parse_optional_iso_date_value(payload.get("start_date") if "start_date" in payload else current["start_date"], "start_date"),
+            end_date=parse_optional_iso_date_value(payload.get("end_date") if "end_date" in payload else current["end_date"], "end_date"),
+            installments_total=int(payload["installments_total"]) if payload.get("installments_total") is not None else current["installments_total"],
+            active=bool(payload.get("active", bool(current["active"]))),
+        )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Campi regola non validi") from exc
+    log_action("api", "Regola aggiornata via API", f"rule_id={rule_id}")
+    updated = next((row for row in get_transaction_rules() if int(row["id"]) == rule_id), None)
+    return {"rule": serialize_sqlite_row(updated) if updated else None}
+
+
+@app.delete("/api/rules/{rule_id}", dependencies=[Depends(require_api_key)])
+def api_delete_rule(rule_id: int) -> dict[str, Any]:
+    delete_transaction_rule(rule_id)
+    log_action("api", "Regola eliminata via API", f"rule_id={rule_id}")
+    return {"ok": True}
+
+
+@app.get("/api/snapshots", dependencies=[Depends(require_api_key)])
+def api_get_snapshots(account_name: str | None = None) -> dict[str, Any]:
+    if account_name:
+        account = require_account(account_name)
+        rows = get_account_snapshots(int(account["id"]))
+    else:
+        rows = get_account_snapshots()
+    return {"snapshots": [serialize_sqlite_row(row) for row in rows]}
+
+
+@app.put("/api/snapshots", dependencies=[Depends(require_api_key)])
+def api_put_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    account = require_account(str(payload.get("account_name") or "").strip())
+    snapshot_date = parse_iso_date_value(str(payload.get("snapshot_date") or ""), "snapshot_date")
+    try:
+        balance = float(payload.get("balance"))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="balance deve essere numerico") from exc
+    upsert_account_snapshot(
+        account_id=int(account["id"]),
+        snapshot_date=snapshot_date,
+        balance=balance,
+        note=(str(payload.get("note") or "").strip() or None),
+    )
+    log_action("api", "Snapshot salvato via API", f"{account['name']} {snapshot_date} {balance:.2f}")
+    snapshot = get_latest_account_snapshot(int(account["id"]), snapshot_date)
+    return {"snapshot": serialize_sqlite_row(snapshot) if snapshot else None}
+
+
+@app.get("/api/settings", dependencies=[Depends(require_api_key)])
+def api_get_settings() -> dict[str, Any]:
+    return {"settings": serialize_settings()}
+
+
+@app.patch("/api/settings", dependencies=[Depends(require_api_key)])
+def api_patch_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    allowed_keys = {
+        "forecast_window_months": lambda value: str(int(value)),
+        "warning_margin": lambda value: str(float(value)),
+        "helper_tooltips_enabled": parse_bool_setting_value,
+        "show_calculated_card_settlement": parse_bool_setting_value,
+        "credit_card_keyword": lambda value: str(value).strip() or "Carta di credito",
+        "api_key": lambda value: str(value).strip(),
+    }
+    for key, value in payload.items():
+        if key not in allowed_keys:
+            raise HTTPException(status_code=422, detail=f"Impostazione non supportata: {key}")
+        set_setting(key, allowed_keys[key](value))
+    log_action("api", "Impostazioni aggiornate via API", ", ".join(sorted(payload.keys())))
+    return {"settings": serialize_settings()}
 
 
 def format_cadence(rule: dict) -> str:
@@ -1174,6 +1589,16 @@ def save_show_calculated_card_settlement(enabled: bool) -> None:
     )
 
 
+def save_show_side_panels(enabled: bool) -> None:
+    set_setting("show_side_panels", "1" if enabled else "0")
+    settings_state["show_side_panels"] = enabled
+    render_settings.refresh()
+    ui.notify(
+        "Pannelli laterali attivati." if enabled else "Pannelli laterali nascosti.",
+        color="positive",
+    )
+
+
 def save_credit_card_keyword(value_text: str) -> None:
     keyword = value_text.strip() or "Carta di credito"
     set_setting("credit_card_keyword", keyword)
@@ -1183,6 +1608,25 @@ def save_credit_card_keyword(value_text: str) -> None:
     render_forecast.refresh()
     render_override_editor.refresh()
     ui.notify("Parola chiave Carta di credito aggiornata.", color="positive")
+
+
+def save_api_key(value_text: str) -> None:
+    api_key = value_text.strip()
+    set_setting("api_key", api_key)
+    settings_state["api_key"] = api_key
+    render_settings.refresh()
+    ui.notify(
+        "Chiave API salvata." if api_key else "Chiave API rimossa.",
+        color="positive",
+    )
+
+
+def generate_api_key() -> None:
+    api_key = secrets.token_urlsafe(24)
+    set_setting("api_key", api_key)
+    settings_state["api_key"] = api_key
+    render_settings.refresh()
+    ui.notify("Nuova chiave API generata.", color="positive")
 
 
 def run_cleanup_manual_events() -> None:
@@ -1396,7 +1840,6 @@ def get_selected_forecast_key() -> str:
 
 def refresh_forecast_selection_ui() -> None:
     if FORECAST_GRID_MODE == "aggrid":
-        render_forecast.refresh()
         return
 
     selected_key = get_selected_forecast_key()
@@ -1422,6 +1865,370 @@ def get_forecast_grid_selection_key(event_args: dict | None) -> str | None:
         return str(value["selection_key"])
 
     return None
+
+
+def build_inline_snapshot_from_row(row: dict) -> dict | None:
+    if row.get("is_manual_event"):
+        event_id = row.get("source_manual_event_id")
+        if event_id is None:
+            return None
+        return {
+            "kind": "manual_event",
+            "selection_key": row.get("selection_key"),
+            "event_id": int(event_id),
+            "event_date": str(row["date_value"]),
+            "description": str(row["description"]),
+            "amount": float(row["amount_value"]),
+            "payment_method": row.get("payment_method") or None,
+            "note": row.get("note") or None,
+        }
+    if row.get("editable"):
+        rule_id = row.get("source_rule_id")
+        if rule_id is None:
+            return None
+        return {
+            "kind": "override",
+            "selection_key": row.get("selection_key"),
+            "rule_id": int(rule_id),
+            "original_event_date": str(row["original_event_date"]),
+            "override_description": row.get("override_description"),
+            "override_event_date": row.get("override_event_date_value"),
+            "override_amount": row.get("override_amount"),
+            "resolution_mode": row.get("override_resolution_mode") or "auto",
+            "status": row.get("override_status") or "open",
+        }
+    return None
+
+
+def get_inline_snapshot_by_selection_key(selection_key: str | None) -> dict | None:
+    if not selection_key:
+        return None
+    row = next(
+        (row for row in override_state["rows"] if row["selection_key"] == selection_key),
+        None,
+    )
+    if row is None:
+        return None
+    return build_inline_snapshot_from_row(row)
+
+
+def push_undo_snapshot(payload: dict | None) -> None:
+    if not isinstance(payload, dict):
+        return
+    stack = list(forecast_state.get("undo_stack") or [])
+    stack.append(payload)
+    forecast_state["undo_stack"] = stack[-3:]
+    forecast_state["redo_stack"] = []
+
+
+def apply_inline_snapshot(payload: dict) -> bool:
+    if payload.get("kind") == "manual_event":
+        update_manual_event(
+            event_id=int(payload["event_id"]),
+            event_date=str(payload["event_date"]),
+            description=str(payload["description"]),
+            amount=float(payload["amount"]),
+            payment_method=payload.get("payment_method"),
+            note=payload.get("note"),
+        )
+        return True
+
+    if payload.get("kind") == "override":
+        account = get_account_by_name(dashboard_state["account_name"])
+        if account is None:
+            ui.notify("Conto non trovato per applicare la modifica.", color="negative")
+            return False
+        override_description = payload.get("override_description")
+        override_event_date = payload.get("override_event_date")
+        override_amount = payload.get("override_amount")
+        resolution_mode = str(payload.get("resolution_mode") or "auto")
+        status = str(payload.get("status") or "open")
+
+        if (
+            override_description is None
+            and override_event_date is None
+            and override_amount is None
+            and resolution_mode == "auto"
+            and status == "open"
+        ):
+            delete_forecast_event_override(
+                int(payload["rule_id"]),
+                int(account["id"]),
+                str(payload["original_event_date"]),
+            )
+            return True
+
+        upsert_forecast_event_override(
+            rule_id=int(payload["rule_id"]),
+            account_id=int(account["id"]),
+            original_event_date=str(payload["original_event_date"]),
+            override_description=override_description,
+            override_event_date=override_event_date,
+            override_amount=override_amount,
+            resolution_mode=resolution_mode,
+            status=status,
+        )
+        return True
+
+    ui.notify("Undo/redo non disponibile per questa modifica.", color="warning")
+    return False
+
+
+def undo_last_inline_edit() -> None:
+    stack = list(forecast_state.get("undo_stack") or [])
+    payload = stack.pop() if stack else None
+    if not isinstance(payload, dict):
+        ui.notify("Nessuna modifica inline da annullare.", color="warning")
+        return
+
+    current_snapshot = get_inline_snapshot_by_selection_key(payload.get("selection_key"))
+    if not apply_inline_snapshot(payload):
+        return
+
+    forecast_state["undo_stack"] = stack
+    redo_stack = list(forecast_state.get("redo_stack") or [])
+    if isinstance(current_snapshot, dict):
+        redo_stack.append(current_snapshot)
+        forecast_state["redo_stack"] = redo_stack[-3:]
+    try_run_default_forecast()
+    if payload.get("selection_key"):
+        select_forecast_row(str(payload["selection_key"]))
+    render_forecast.refresh()
+    render_manual_event_editor.refresh()
+    render_override_editor.refresh()
+    ui.notify("Ultima modifica annullata.", color="positive")
+
+
+def redo_last_inline_edit() -> None:
+    stack = list(forecast_state.get("redo_stack") or [])
+    payload = stack.pop() if stack else None
+    if not isinstance(payload, dict):
+        ui.notify("Nessuna modifica da ripristinare.", color="warning")
+        return
+
+    current_snapshot = get_inline_snapshot_by_selection_key(payload.get("selection_key"))
+    if not apply_inline_snapshot(payload):
+        return
+
+    forecast_state["redo_stack"] = stack
+    undo_stack = list(forecast_state.get("undo_stack") or [])
+    if isinstance(current_snapshot, dict):
+        undo_stack.append(current_snapshot)
+        forecast_state["undo_stack"] = undo_stack[-3:]
+    try_run_default_forecast()
+    if payload.get("selection_key"):
+        select_forecast_row(str(payload["selection_key"]))
+    render_forecast.refresh()
+    render_manual_event_editor.refresh()
+    render_override_editor.refresh()
+    ui.notify("Modifica ripristinata.", color="positive")
+
+
+def handle_forecast_grid_cell_value_changed(event_args: dict | None) -> None:
+    if not isinstance(event_args, dict):
+        return
+
+    col_id = str(event_args.get("colId") or "")
+    if col_id not in {"description_label", "amount_value", "date"}:
+        return
+
+    selection_key = get_forecast_grid_selection_key(event_args)
+    if not selection_key:
+        return
+
+    selected_row = next(
+        (row for row in override_state["rows"] if row["selection_key"] == selection_key),
+        None,
+    )
+    if selected_row is None:
+        render_forecast.refresh()
+        return
+    snapshot_payload = build_inline_snapshot_from_row(selected_row)
+
+    if col_id == "description_label":
+        new_description = str(event_args.get("newValue") or "").strip()
+        old_description = str(event_args.get("oldValue") or "").strip()
+        if new_description == old_description:
+            return
+        if not new_description:
+            ui.notify("La descrizione non puo essere vuota.", color="negative")
+            render_forecast.refresh()
+            return
+        push_undo_snapshot(snapshot_payload)
+
+        if selected_row["is_manual_event"]:
+            event_id = selected_row.get("source_manual_event_id")
+            if event_id is None:
+                render_forecast.refresh()
+                return
+            update_manual_event(
+                event_id=int(event_id),
+                event_date=str(selected_row["date_value"]),
+                description=new_description,
+                amount=float(selected_row["amount_value"]),
+                payment_method=selected_row["payment_method"] or None,
+                note=selected_row["note"] or None,
+            )
+            log_action("db", "Movimento manuale aggiornato inline", new_description)
+            ui.notify("Descrizione movimento aggiornata.", color="positive")
+        elif selected_row["editable"]:
+            account = get_account_by_name(dashboard_state["account_name"])
+            rule_id = selected_row.get("source_rule_id")
+            if account is None or rule_id is None:
+                render_forecast.refresh()
+                return
+
+            override_description = None
+            if new_description != (selected_row.get("original_description") or ""):
+                override_description = new_description
+
+            upsert_forecast_event_override(
+                rule_id=int(rule_id),
+                account_id=int(account["id"]),
+                original_event_date=str(selected_row["original_event_date"]),
+                override_description=override_description,
+                override_event_date=selected_row.get("override_event_date_value"),
+                override_amount=selected_row.get("override_amount"),
+                resolution_mode=str(selected_row.get("override_resolution_mode") or "auto"),
+                status=str(selected_row.get("override_status") or "open"),
+            )
+            log_action("db", "Override descrizione aggiornato inline", new_description)
+            ui.notify("Descrizione override aggiornata.", color="positive")
+        else:
+            render_forecast.refresh()
+            return
+
+    if col_id == "amount_value":
+        try:
+            new_amount = float(str(event_args.get("newValue") or "").replace(",", "."))
+        except ValueError:
+            ui.notify("Inserisci un importo valido.", color="negative")
+            render_forecast.refresh()
+            return
+
+        if round(new_amount, 2) == round(float(event_args.get("oldValue") or 0), 2):
+            return
+        if new_amount < 0:
+            new_amount = abs(new_amount)
+        signed_amount = -new_amount if float(selected_row["amount_value"]) < 0 else new_amount
+        push_undo_snapshot(snapshot_payload)
+
+        if selected_row["is_manual_event"]:
+            event_id = selected_row.get("source_manual_event_id")
+            if event_id is None:
+                render_forecast.refresh()
+                return
+            update_manual_event(
+                event_id=int(event_id),
+                event_date=str(selected_row["date_value"]),
+                description=str(selected_row["description"]),
+                amount=signed_amount,
+                payment_method=selected_row["payment_method"] or None,
+                note=selected_row["note"] or None,
+            )
+            log_action("db", "Movimento manuale importo aggiornato inline", f"{signed_amount:.2f}")
+            ui.notify("Importo movimento aggiornato.", color="positive")
+        elif selected_row["editable"]:
+            account = get_account_by_name(dashboard_state["account_name"])
+            rule_id = selected_row.get("source_rule_id")
+            if account is None or rule_id is None:
+                render_forecast.refresh()
+                return
+
+            override_amount = None
+            if round(signed_amount, 2) != round(float(selected_row.get("original_amount") or 0), 2):
+                override_amount = signed_amount
+
+            upsert_forecast_event_override(
+                rule_id=int(rule_id),
+                account_id=int(account["id"]),
+                original_event_date=str(selected_row["original_event_date"]),
+                override_description=selected_row.get("override_description"),
+                override_event_date=selected_row.get("override_event_date_value"),
+                override_amount=override_amount,
+                resolution_mode=str(selected_row.get("override_resolution_mode") or "auto"),
+                status=str(selected_row.get("override_status") or "open"),
+            )
+            log_action("db", "Override importo aggiornato inline", f"{signed_amount:.2f}")
+            ui.notify("Importo override aggiornato.", color="positive")
+        else:
+            render_forecast.refresh()
+            return
+
+    if col_id == "date":
+        new_date_text = str(event_args.get("newValue") or "").strip()
+        old_date_text = str(event_args.get("oldValue") or "").strip()
+        if new_date_text == old_date_text:
+            return
+        try:
+            parsed_date = parse_ui_date(new_date_text).isoformat()
+        except ValueError:
+            ui.notify("Inserisci una data valida nel formato GG-MM-AAAA.", color="negative")
+            render_forecast.refresh()
+            return
+        push_undo_snapshot(snapshot_payload)
+
+        if selected_row["is_manual_event"]:
+            event_id = selected_row.get("source_manual_event_id")
+            if event_id is None:
+                render_forecast.refresh()
+                return
+            update_manual_event(
+                event_id=int(event_id),
+                event_date=parsed_date,
+                description=str(selected_row["description"]),
+                amount=float(selected_row["amount_value"]),
+                payment_method=selected_row["payment_method"] or None,
+                note=selected_row["note"] or None,
+            )
+            log_action("db", "Movimento manuale data aggiornata inline", parsed_date)
+            ui.notify("Data movimento aggiornata.", color="positive")
+        elif selected_row["editable"]:
+            account = get_account_by_name(dashboard_state["account_name"])
+            rule_id = selected_row.get("source_rule_id")
+            if account is None or rule_id is None:
+                render_forecast.refresh()
+                return
+
+            resolution_mode = str(selected_row.get("override_resolution_mode") or "auto")
+            latest_snapshot = get_latest_account_snapshot(account["id"])
+            if (
+                latest_snapshot
+                and date.fromisoformat(parsed_date)
+                < date.fromisoformat(latest_snapshot["snapshot_date"])
+                and resolution_mode == "auto"
+            ):
+                resolution_mode = "manual"
+                ui.notify(
+                    "La nuova data e precedente alla riconciliazione: l'override passa in modalita Manuale.",
+                    color="warning",
+                )
+
+            override_event_date = None
+            if parsed_date != str(selected_row["original_event_date"]):
+                override_event_date = parsed_date
+
+            upsert_forecast_event_override(
+                rule_id=int(rule_id),
+                account_id=int(account["id"]),
+                original_event_date=str(selected_row["original_event_date"]),
+                override_description=selected_row.get("override_description"),
+                override_event_date=override_event_date,
+                override_amount=selected_row.get("override_amount"),
+                resolution_mode=resolution_mode,
+                status=str(selected_row.get("override_status") or "open"),
+            )
+            log_action("db", "Override data aggiornata inline", parsed_date)
+            ui.notify("Data override aggiornata.", color="positive")
+        else:
+            render_forecast.refresh()
+            return
+
+    try_run_default_forecast()
+    select_forecast_row(selection_key)
+    render_forecast.refresh()
+    render_manual_event_editor.refresh()
+    render_override_editor.refresh()
 
 
 def select_forecast_row(value: str | None) -> None:
@@ -1745,6 +2552,8 @@ forecast_state = {
     "opening_balance": "",
     "result": None,
     "selected_key": "",
+    "undo_stack": [],
+    "redo_stack": [],
 }
 dashboard_state = {
     "account_name": "Fineco",
@@ -1753,9 +2562,11 @@ settings_state = {
     "forecast_window_months": str(get_forecast_window_months()),
     "warning_margin": str(int(get_warning_margin())),
     "helper_tooltips_enabled": get_helper_tooltips_enabled(),
+    "show_side_panels": get_bool_setting("show_side_panels", True),
     "show_calculated_card_settlement": get_bool_setting(
         "show_calculated_card_settlement", True
     ),
+    "api_key": get_setting("api_key", "") or "",
     "credit_card_keyword": get_setting("credit_card_keyword", "Carta di credito")
     or "Carta di credito",
     "log_category": "all",
@@ -2287,6 +3098,9 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         "override_status": event.override_status,
                         "override_resolution_mode": event.override_resolution_mode,
                         "override_description": event.override_description,
+                        "override_event_date_value": event.override_event_date.isoformat()
+                        if event.override_event_date
+                        else None,
                         "override_event_date": format_ui_date(event.override_event_date)
                         if event.override_event_date
                         else "",
@@ -2343,6 +3157,10 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     lambda event: select_forecast_row(
                         get_forecast_grid_selection_key(event.args)
                     ),
+                )
+                grid.on(
+                    "cellValueChanged",
+                    lambda event: handle_forecast_grid_cell_value_changed(event.args),
                 )
             else:
                 table = ui.table(
@@ -2759,6 +3577,20 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         ui.icon(icon_name).style(f"color: {color}; font-size: 14px")
                         ui.label(label).style("font-size: 10px; color: #6b5b53")
 
+    def render_forecast_history_actions() -> None:
+        if FORECAST_GRID_MODE != "aggrid":
+            return
+        can_undo = bool(forecast_state.get("undo_stack"))
+        can_redo = bool(forecast_state.get("redo_stack"))
+        with ui.card().classes("w-full"):
+            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                ui.button("Undo", on_click=undo_last_inline_edit).props(
+                    "outline dense" + ("" if can_undo else " disable")
+                )
+                ui.button("Redo", on_click=redo_last_inline_edit).props(
+                    "outline dense" + ("" if can_redo else " disable")
+                )
+
     @ui.refreshable
     def render_settings() -> None:
         accounts = get_accounts()
@@ -2898,6 +3730,44 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         ).classes("min-w-[220px]")
 
             with ui.card().classes("w-full lg:w-[calc(50%-0.5rem)]"):
+                ui.label("Accesso API").style(
+                    "margin-top: -6px; font-size: 22px; font-weight: 600"
+                )
+                with ui.column().classes("gap-3"):
+                    ui.label(
+                        f"Endpoint base: /api | Header: {API_HEADER_NAME}"
+                    ).style("color: #6b5b53; font-size: 12px")
+                    ui.label(
+                        "Stato API: attiva" if is_api_enabled() else "Stato API: disattivata (configura una chiave)"
+                    ).style("color: #6b5b53; font-size: 12px")
+                    ui.label(
+                        "Source chiave: env"
+                        if (os.environ.get(API_KEY_ENV_VAR) or "").strip()
+                        else "Source chiave: sqlite"
+                    ).style("color: #6b5b53; font-size: 12px")
+                    with ui.row().classes("items-end gap-3 flex-wrap"):
+                        api_key_input = add_tooltip(
+                            ui.input(
+                                label="Chiave API locale",
+                                value=settings_state["api_key"],
+                                password=True,
+                                password_toggle_button=True,
+                            ),
+                            "Chiave usata dagli agenti o client locali per autenticarsi alle API. Se imposti FINANCE_APP_API_KEY nell'ambiente, quella ha priorita sulla chiave salvata qui.",
+                        ).classes("min-w-[280px] flex-1")
+                        add_tooltip(
+                            ui.button(
+                                "Salva chiave",
+                                on_click=lambda: save_api_key(api_key_input.value),
+                            ),
+                            "Salva o rimuovi la chiave API locale usata dagli endpoint /api.",
+                        )
+                        add_tooltip(
+                            ui.button("Genera nuova", on_click=generate_api_key),
+                            "Genera una nuova chiave API casuale e la salva nelle impostazioni locali.",
+                        )
+
+            with ui.card().classes("w-full lg:w-[calc(50%-0.5rem)]"):
                 ui.label("Eventi").style("margin-top: -6px; font-size: 22px; font-weight: 600")
                 with ui.scroll_area().classes("w-full h-[220px] pr-2"):
                     for entry in get_app_logs(150, "all"):
@@ -2944,6 +3814,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
             render_dashboard_header()
             with ui.row().classes("w-full items-start gap-4 no-wrap"):
                 with ui.column().classes("min-w-0").style("flex: 1 1 0;"):
+                    render_forecast_history_actions()
                     render_forecast()
                 with ui.column().classes("gap-4").style("width: 320px; flex: 0 0 320px;"):
                     with ui.column().classes("w-full sticky top-4 gap-4"):
