@@ -1,5 +1,6 @@
 import os
 import secrets
+import socket
 import subprocess
 import tempfile
 import inspect
@@ -239,6 +240,19 @@ def serialize_settings() -> dict[str, Any]:
         "api_enabled": is_api_enabled(),
         "api_key_source": "env" if (os.environ.get(API_KEY_ENV_VAR) or "").strip() else "sqlite",
     }
+
+
+def get_local_api_urls(port: int = 8080) -> list[str]:
+    urls = [f"http://127.0.0.1:{port}/api", f"http://localhost:{port}/api"]
+    try:
+        _, _, addresses = socket.gethostbyname_ex(socket.gethostname())
+        for address in sorted(set(addresses)):
+            if address.startswith("127."):
+                continue
+            urls.append(f"http://{address}:{port}/api")
+    except OSError:
+        pass
+    return urls
 
 ACCOUNT_LOGO_DIR.mkdir(exist_ok=True)
 ASSET_DIR.mkdir(exist_ok=True)
@@ -795,6 +809,35 @@ def action_button(label: str, icon: str, on_click, style: str = "flat"):
         )
     return ui.button(icon=icon, on_click=on_click).style(
         "background:#ffffff;color:#5898d4;min-width:32px;width:32px;height:32px;padding:0;border:1px solid rgba(88,152,212,0.28);"
+    )
+
+
+def apply_movements_side_panel_visibility() -> None:
+    show_panels = bool(settings_state.get("show_side_panels", True))
+    side_display = "flex" if show_panels else "none"
+    gap_value = "16px" if show_panels else "0px"
+    ui.run_javascript(
+        """
+        (() => {
+            const row = document.querySelector('.movements-layout-row');
+            const main = document.querySelector('.movements-main-column');
+            const side = document.querySelector('.movements-side-column');
+            if (!row || !main || !side) return;
+            row.style.gap = '%s';
+            side.style.display = '%s';
+            side.style.width = '%s';
+            side.style.flex = '%s';
+            main.style.flex = '1 1 0';
+            main.style.width = '%s';
+        })();
+        """
+        % (
+            gap_value,
+            side_display,
+            "320px" if show_panels else "0px",
+            "0 0 320px" if show_panels else "0 0 0px",
+            "" if show_panels else "100%",
+        )
     )
 
 
@@ -1624,6 +1667,7 @@ def save_show_side_panels(enabled: bool) -> None:
     set_setting("show_side_panels", "1" if enabled else "0")
     settings_state["show_side_panels"] = enabled
     render_settings.refresh()
+    apply_movements_side_panel_visibility()
     ui.notify(
         "Pannelli laterali attivati." if enabled else "Pannelli laterali nascosti.",
         color="positive",
@@ -3785,6 +3829,14 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         ),
                         "Attiva o disattiva il calcolo e la visualizzazione della riga Carta di credito calcolata.",
                     )
+                    add_tooltip(
+                        ui.switch(
+                            text="Mostra pannelli laterali in Movimenti",
+                            value=settings_state["show_side_panels"],
+                            on_change=lambda event: save_show_side_panels(bool(event.value)),
+                        ),
+                        "Mostra o nasconde i riquadri laterali nella pagina Movimenti per liberare piu spazio alla griglia.",
+                    )
                     ui.label("Pulsanti toolbar").style("margin-top: -4px; color: #6b5b53; font-size: 12px")
                     add_tooltip(
                         ui.switch(
@@ -3844,6 +3896,14 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     ui.label(
                         f"Endpoint base: /api | Header: {API_HEADER_NAME}"
                     ).style("color: #6b5b53; font-size: 12px")
+                    with ui.column().classes("gap-0"):
+                        ui.label("URL locali disponibili:").style(
+                            "color: #6b5b53; font-size: 12px"
+                        )
+                        for api_url in get_local_api_urls():
+                            ui.label(api_url).style(
+                                "font-family: 'IBM Plex Mono', monospace; font-size: 11px; color: #2f241f"
+                            )
                     ui.label(
                         "Stato API: attiva" if is_api_enabled() else "Stato API: disattivata (configura una chiave)"
                     ).style("color: #6b5b53; font-size: 12px")
@@ -3919,15 +3979,16 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
     with ui.tab_panels(tabs, value=dashboard_tab).classes("w-full"):
         with ui.tab_panel(dashboard_tab).classes("gap-4"):
             render_dashboard_header()
-            with ui.row().classes("w-full items-start gap-4 no-wrap"):
-                with ui.column().classes("min-w-0").style("flex: 1 1 0;"):
+            with ui.row().classes("w-full items-start no-wrap movements-layout-row").style("gap: 16px;"):
+                with ui.column().classes("min-w-0 movements-main-column").style("flex: 1 1 0;"):
                     render_forecast_history_actions()
                     render_forecast()
-                with ui.column().classes("gap-4").style("width: 320px; flex: 0 0 320px;"):
+                with ui.column().classes("gap-4 movements-side-column").style("width: 320px; flex: 0 0 320px;"):
                     with ui.column().classes("w-full sticky top-4 gap-4"):
                         render_manual_event_editor()
                         render_override_editor()
             render_forecast_legend()
+            ui.timer(0.2, apply_movements_side_panel_visibility, once=True)
 
         with ui.tab_panel(rules_tab).classes("gap-4"):
             with ui.card().classes("w-full"):
