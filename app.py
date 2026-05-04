@@ -778,6 +778,26 @@ def optional_title_attr(text: str) -> str:
     return f' title="{escape(text)}"'
 
 
+def action_button(label: str, icon: str, on_click, style: str = "flat"):
+    show_text = settings_state.get("toolbar_button_mode", "icon") == "text"
+    if style == "outline":
+        if show_text:
+            return ui.button(label, on_click=on_click).props("dense").style(
+                "background:#2f241f;color:#ffffff;min-height:32px;padding:0 10px;"
+            )
+        return ui.button(icon=icon, on_click=on_click).style(
+            "background:#ffffff;color:#5898d4;min-width:32px;width:32px;height:32px;padding:0;border:1px solid rgba(88,152,212,0.28);"
+        )
+
+    if show_text:
+        return ui.button(label, on_click=on_click).props("dense").style(
+            "background:#2f241f;color:#ffffff;min-height:32px;padding:0 10px;"
+        )
+    return ui.button(icon=icon, on_click=on_click).style(
+        "background:#ffffff;color:#5898d4;min-width:32px;width:32px;height:32px;padding:0;border:1px solid rgba(88,152,212,0.28);"
+    )
+
+
 @app.get("/api/health", dependencies=[Depends(require_api_key)])
 def api_health() -> dict[str, Any]:
     return {
@@ -1134,8 +1154,18 @@ def load_rules(account_filter: str, show_expired: bool = False) -> list[dict]:
     rules = [dict(row) for row in get_transaction_rules()]
     if account_filter != "Tutti":
         rules = [rule for rule in rules if rule["account_name"] == account_filter]
-    if not show_expired:
-        rules = [rule for rule in rules if not is_rule_expired(rule["end_date"])]
+    if show_expired:
+        rules = [
+            rule
+            for rule in rules
+            if is_rule_expired(rule["end_date"]) or not rule["active"]
+        ]
+    else:
+        rules = [
+            rule
+            for rule in rules
+            if rule["active"] and not is_rule_expired(rule["end_date"])
+        ]
     return rules
 
 
@@ -1580,6 +1610,7 @@ def save_show_calculated_card_settlement(enabled: bool) -> None:
     try_run_default_forecast()
     render_settings.refresh()
     render_forecast.refresh()
+    render_forecast_history_actions.refresh()
     render_override_editor.refresh()
     ui.notify(
         "Carta di credito calcolata attivata."
@@ -1606,6 +1637,7 @@ def save_credit_card_keyword(value_text: str) -> None:
     try_run_default_forecast()
     render_settings.refresh()
     render_forecast.refresh()
+    render_forecast_history_actions.refresh()
     render_override_editor.refresh()
     ui.notify("Parola chiave Carta di credito aggiornata.", color="positive")
 
@@ -1627,6 +1659,18 @@ def generate_api_key() -> None:
     settings_state["api_key"] = api_key
     render_settings.refresh()
     ui.notify("Nuova chiave API generata.", color="positive")
+
+
+def save_action_button_show_text(enabled: bool) -> None:
+    mode = "text" if enabled else "icon"
+    set_setting("toolbar_button_mode", mode)
+    settings_state["toolbar_button_mode"] = mode
+    render_settings.refresh()
+    render_forecast_history_actions.refresh()
+    render_manual_event_editor.refresh()
+    render_override_editor.refresh()
+    ui.notify("Visualizzazione pulsanti azione aggiornata.", color="positive")
+    ui.run_javascript("window.location.reload()")
 
 
 def run_cleanup_manual_events() -> None:
@@ -1817,6 +1861,7 @@ def save_manual_event() -> None:
     refresh_forecast_selection_ui()
     try_run_default_forecast()
     render_forecast.refresh()
+    render_forecast_history_actions.refresh()
     render_manual_event_editor.refresh()
 
 
@@ -1994,6 +2039,7 @@ def undo_last_inline_edit() -> None:
     if payload.get("selection_key"):
         select_forecast_row(str(payload["selection_key"]))
     render_forecast.refresh()
+    render_forecast_history_actions.refresh()
     render_manual_event_editor.refresh()
     render_override_editor.refresh()
     ui.notify("Ultima modifica annullata.", color="positive")
@@ -2019,6 +2065,7 @@ def redo_last_inline_edit() -> None:
     if payload.get("selection_key"):
         select_forecast_row(str(payload["selection_key"]))
     render_forecast.refresh()
+    render_forecast_history_actions.refresh()
     render_manual_event_editor.refresh()
     render_override_editor.refresh()
     ui.notify("Modifica ripristinata.", color="positive")
@@ -2227,6 +2274,7 @@ def handle_forecast_grid_cell_value_changed(event_args: dict | None) -> None:
     try_run_default_forecast()
     select_forecast_row(selection_key)
     render_forecast.refresh()
+    render_forecast_history_actions.refresh()
     render_manual_event_editor.refresh()
     render_override_editor.refresh()
 
@@ -2277,6 +2325,7 @@ def select_forecast_row(value: str | None) -> None:
             select_override_event(None, refresh_editor=False)
 
     refresh_forecast_selection_ui()
+    render_forecast_history_actions.refresh()
     render_manual_event_editor.refresh()
     render_override_editor.refresh()
 
@@ -2293,6 +2342,7 @@ def delete_manual_event() -> None:
     clear_manual_event_selection(refresh_editor=False)
     try_run_default_forecast()
     render_forecast.refresh()
+    render_forecast_history_actions.refresh()
     render_manual_event_editor.refresh()
 
 
@@ -2332,6 +2382,7 @@ def duplicate_manual_event_next_month() -> None:
     ui.notify("Movimento duplicato al mese successivo.", color="positive")
     try_run_default_forecast()
     render_forecast.refresh()
+    render_forecast_history_actions.refresh()
     render_manual_event_editor.refresh()
 
 
@@ -2498,6 +2549,7 @@ def save_event_override() -> None:
     ui.notify("Override salvato.", color="positive")
     try_run_default_forecast()
     render_forecast.refresh()
+    render_forecast_history_actions.refresh()
     render_override_editor.refresh()
 
 
@@ -2514,6 +2566,7 @@ def clear_event_override() -> None:
     ui.notify("Override rimosso.", color="positive")
     try_run_default_forecast()
     render_forecast.refresh()
+    render_forecast_history_actions.refresh()
     render_override_editor.refresh()
 
 
@@ -2567,6 +2620,7 @@ settings_state = {
         "show_calculated_card_settlement", True
     ),
     "api_key": get_setting("api_key", "") or "",
+    "toolbar_button_mode": get_setting("toolbar_button_mode", "icon") or "icon",
     "credit_card_keyword": get_setting("credit_card_keyword", "Carta di credito")
     or "Carta di credito",
     "log_category": "all",
@@ -2707,6 +2761,26 @@ ui.add_head_html(
         font-size: 16px;
         line-height: 1;
     }
+    .q-btn {
+        box-shadow: none !important;
+        border-radius: 4px !important;
+        text-transform: uppercase !important;
+        letter-spacing: 0.04em;
+        font-weight: 500;
+        min-height: 32px !important;
+        padding: 0 10px !important;
+    }
+    .q-btn::before,
+    .q-btn__content {
+        box-shadow: none !important;
+    }
+    .q-btn--round {
+        min-width: 32px !important;
+        width: 32px !important;
+        height: 32px !important;
+        border-radius: 4px !important;
+        padding: 0 !important;
+    }
     </style>
     """
 )
@@ -2765,7 +2839,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                                     refresh_all_rule_views(),
                                 ),
                             ),
-                            "Mostra anche le regole scadute, cosi puoi modificarle o estenderne la validita.",
+                            "Quando attivo mostra solo le regole scadute o disattivate manualmente; quando spento mostra solo quelle effettive.",
                         )
 
     @ui.refreshable
@@ -2854,7 +2928,9 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 ).style("font-size: 18px; font-weight: 600")
                 if selected_rule_id is None:
                     add_tooltip(
-                        ui.button(icon="add", on_click=start_new_rule).props("round flat"),
+                        action_button("Nuova", "add", start_new_rule).style(
+                            "margin-top: 6px;"
+                        ),
                         "Prepara il form per inserire una nuova regola.",
                     )
                 if selected_rule_id is not None:
@@ -3008,24 +3084,18 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     ),
                     "Numero totale rate, se la regola rappresenta un pagamento rateale.",
                 ).classes("w-full")
-                with ui.row().classes("w-full justify-end gap-2 pt-0"):
+                with ui.row().classes("w-full justify-end gap-2").style("margin-top: 18px;"):
                     if selected_rule_id is not None:
                         add_tooltip(
-                            ui.button(icon="delete", on_click=delete_selected_rule).props(
-                                "round flat"
-                            ),
+                            action_button("Elimina", "delete", delete_selected_rule),
                             "Elimina completamente la regola selezionata.",
                         )
                     add_tooltip(
-                        ui.button(icon="close", on_click=clear_rule_selection).props(
-                            "round flat"
-                        ),
+                        action_button("Chiudi", "close", clear_rule_selection),
                         "Deseleziona la regola e svuota il pannello di modifica.",
                     )
                     add_tooltip(
-                        ui.button(icon="save", on_click=save_rule_changes).props(
-                            "round flat"
-                        ),
+                        action_button("Salva", "save", save_rule_changes),
                         "Salva i cambiamenti fatti alla regola selezionata.",
                     )
 
@@ -3274,17 +3344,18 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 ui.label(title).style("font-size: 18px; font-weight: 600")
                 if manual_event_state["selected_event_id"] is None:
                     add_tooltip(
-                        ui.button(icon="add", on_click=toggle_manual_event_editor).props(
-                            "round flat"
+                        action_button("Nuovo", "add", toggle_manual_event_editor).style(
+                            "margin-top: 6px;"
                         ),
                         "Apri o chiudi il riquadro del movimento una tantum.",
                     )
                 if manual_event_state["selected_event_id"] is not None:
                     add_tooltip(
-                        ui.button(
-                            icon=("expand_less" if manual_event_state["expanded"] else "expand_more"),
-                            on_click=toggle_manual_event_editor,
-                        ).props("round flat"),
+                        action_button(
+                            "Comprimi" if manual_event_state["expanded"] else "Espandi",
+                            "expand_less" if manual_event_state["expanded"] else "expand_more",
+                            toggle_manual_event_editor,
+                        ),
                         "Apri o chiudi il riquadro del movimento una tantum.",
                     )
             if not manual_event_state["expanded"] and manual_event_state["selected_event_id"] is None:
@@ -3346,35 +3417,29 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     ),
                     "Indica se il movimento impatta il conto direttamente o passa dalla carta.",
                 ).classes("w-full")
-                with ui.row().classes("w-full justify-end gap-2 pt-0"):
+                with ui.row().classes("w-full justify-end gap-2").style("margin-top: 14px;"):
                     if manual_event_state["selected_event_id"] is not None:
                         add_tooltip(
-                            ui.button(
-                                icon="content_copy",
-                                on_click=duplicate_manual_event_next_month,
-                            ),
+                            action_button("Duplica", "content_copy", duplicate_manual_event_next_month),
                             "Duplica questo movimento al mese successivo mantenendo gli stessi dati.",
-                        ).props("round flat")
+                        )
                         add_tooltip(
-                            ui.button(icon="close", on_click=clear_manual_event_selection),
+                            action_button("Chiudi", "close", clear_manual_event_selection),
                             "Esci dalla modifica e svuota il form senza cancellare il movimento.",
-                        ).props("round flat")
+                        )
                         add_tooltip(
-                            ui.button(icon="delete", on_click=delete_manual_event),
+                            action_button("Annulla movimento", "delete", delete_manual_event),
                             "Annulla il movimento manuale selezionato e toglilo dalla previsione.",
-                        ).props("round flat")
+                        )
                     else:
                         add_tooltip(
-                            ui.button(icon="close", on_click=cancel_manual_event_editor),
+                            action_button("Chiudi", "close", cancel_manual_event_editor),
                             "Chiudi il riquadro senza salvare il movimento.",
-                        ).props("round flat")
+                        )
                     add_tooltip(
-                        ui.button(
-                            icon="save",
-                            on_click=save_manual_event,
-                        ),
+                        action_button("Salva", "save", save_manual_event),
                         "Salva questo movimento manuale oppure aggiorna quello selezionato.",
-                    ).props("round flat")
+                    )
 
     @ui.refreshable
     def render_override_editor() -> None:
@@ -3491,22 +3556,20 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                     ),
                     "Stato operativo dell'override selezionato.",
                 ).classes("w-full")
-                with ui.row().classes("w-full justify-end gap-2 pt-0"):
+                with ui.row().classes("w-full justify-end gap-2").style("margin-top: 18px;"):
                     add_tooltip(
-                        ui.button(icon="close", on_click=lambda: select_override_event(None)).props(
-                            "round flat"
-                        ),
+                        action_button("Chiudi", "close", lambda: select_override_event(None)),
                         "Chiudi la personalizzazione senza salvare modifiche.",
                     )
                     if selected_editable_row and selected_editable_row["has_override"]:
                         add_tooltip(
-                            ui.button(icon="restore_page", on_click=clear_event_override),
+                            action_button("Ripristina", "restore_page", clear_event_override),
                             "Ripristina il movimento originale dal database rimuovendo l'override.",
-                        ).props("round flat")
+                        )
                     add_tooltip(
-                        ui.button(icon="save", on_click=save_event_override),
+                        action_button("Salva", "save", save_event_override),
                         "Salva la personalizzazione del movimento selezionato.",
-                    ).props("round flat")
+                    )
 
     @ui.refreshable
     def render_dashboard_header() -> None:
@@ -3555,9 +3618,9 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         "Nota facoltativa per ricordare come hai verificato o riconciliato il saldo.",
                     ).classes("min-w-[160px] flex-1")
                     add_tooltip(
-                        ui.button(icon="save", on_click=save_snapshot),
+                        action_button("Salva snapshot", "save", save_snapshot),
                         "Salva o aggiorna lo snapshot del saldo reale per il conto attivo.",
-                    ).props("round flat")
+                    )
 
     def render_forecast_legend() -> None:
         if FORECAST_GRID_MODE != "aggrid":
@@ -3577,18 +3640,53 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         ui.icon(icon_name).style(f"color: {color}; font-size: 14px")
                         ui.label(label).style("font-size: 10px; color: #6b5b53")
 
+    def render_rules_legend() -> None:
+        with ui.card().classes("w-full"):
+            with ui.row().classes("w-full items-center justify-between gap-x-3 gap-y-1 flex-wrap text-[10px] text-[#6b5b53]"):
+                for icon_name, color, label in (
+                    ("account_balance_wallet", "#607d8b", "Pagamento conto"),
+                    ("credit_card", "#607d8b", "Pagamento carta"),
+                    ("date_range", "#607d8b", "Cadenza mensile"),
+                    ("calendar_month", "#607d8b", "Cadenza annuale"),
+                    ("calendar_today", "#607d8b", "Regola senza scadenza"),
+                    ("event_repeat", "#607d8b", "Regola con data fine"),
+                ):
+                    with ui.row().classes("items-center gap-1 no-wrap"):
+                        ui.icon(icon_name).style(f"color: {color}; font-size: 14px")
+                        ui.label(label).style("font-size: 10px; color: #6b5b53")
+
+    def add_toolbar_action(
+        label: str,
+        icon: str,
+        on_click,
+        tooltip_text: str,
+    ) -> None:
+        button = action_button(label=label, icon=icon, on_click=on_click, style="outline")
+        add_tooltip(button, tooltip_text)
+
+    @ui.refreshable
     def render_forecast_history_actions() -> None:
         if FORECAST_GRID_MODE != "aggrid":
             return
-        can_undo = bool(forecast_state.get("undo_stack"))
-        can_redo = bool(forecast_state.get("redo_stack"))
         with ui.card().classes("w-full"):
             with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                ui.button("Undo", on_click=undo_last_inline_edit).props(
-                    "outline dense" + ("" if can_undo else " disable")
+                add_toolbar_action(
+                    label="Annulla operazione",
+                    icon="undo",
+                    on_click=undo_last_inline_edit,
+                    tooltip_text="Annulla l'ultima modifica inline disponibile.",
                 )
-                ui.button("Redo", on_click=redo_last_inline_edit).props(
-                    "outline dense" + ("" if can_redo else " disable")
+                add_toolbar_action(
+                    label="Ripristina operazione",
+                    icon="redo",
+                    on_click=redo_last_inline_edit,
+                    tooltip_text="Ripristina l'ultima modifica annullata.",
+                )
+                add_toolbar_action(
+                    label="Ripristina override",
+                    icon="restore_page",
+                    on_click=clear_event_override,
+                    tooltip_text="Rimuove l'override della riga selezionata e ripristina l'evento originale.",
                 )
 
     @ui.refreshable
@@ -3687,6 +3785,15 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                         ),
                         "Attiva o disattiva il calcolo e la visualizzazione della riga Carta di credito calcolata.",
                     )
+                    ui.label("Pulsanti toolbar").style("margin-top: -4px; color: #6b5b53; font-size: 12px")
+                    add_tooltip(
+                        ui.switch(
+                            text="Mostra testo sui pulsanti azione",
+                            value=settings_state["toolbar_button_mode"] == "text",
+                            on_change=lambda event: save_action_button_show_text(bool(event.value)),
+                        ),
+                        "Attiva il testo per tutti i pulsanti azione che normalmente vengono mostrati come icone nell'applicazione.",
+                    ).classes("w-full")
                     with ui.row().classes("items-end gap-3 flex-wrap"):
                         credit_card_keyword_input = add_tooltip(
                             ui.input(
@@ -3844,6 +3951,7 @@ with ui.column().classes("w-full max-w-7xl mx-auto gap-4 p-6"):
                 with ui.column().classes("min-w-0").style("width: 400px; flex: 0 0 400px;"):
                     with ui.column().classes("w-full sticky top-0"):
                         render_rule_editor()
+            render_rules_legend()
 
         with ui.tab_panel(settings_tab).classes("gap-4"):
             render_settings()
